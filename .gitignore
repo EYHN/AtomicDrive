@@ -1,1 +1,7 @@
+Cargo.lock
 /target
+node_modules
+/crates/view/pkg
+/dist
+.DS_Store
+test_results/

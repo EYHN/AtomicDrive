@@ -1,0 +1,12 @@
+[package]
+name = "file_local"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+file = { path = "../file" }
+utils = { path = "../utils" }
+rocksdb = { version = "0.20", features = ["lz4"], default-features = false }
+
+[dev-dependencies]
+test-results = "0.1.2"
