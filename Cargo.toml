@@ -2,6 +2,6 @@
 members = [
     "./crates/file",
     "./crates/file_local",
-    "./crates/gossip",
-    "./crates/gossip-simulator"
+    "./crates/utils",
+    "./crates/sync"
 ]

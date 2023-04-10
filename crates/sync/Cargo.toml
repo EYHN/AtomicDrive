@@ -1,0 +1,13 @@
+[package]
+name = "sync"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+utils = { path = "../utils" }
+file = { path = "../file" }
+serde = { version = "1.0", features = ["derive"] }
+fastcdc = "3.0.3"
+crdts = "7.3.0"
+sha2 = "0.10.6"
+libp2p = { version = "0.51.2", features = ["serde"] }

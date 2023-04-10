@@ -16,3 +16,9 @@ pub enum FileType {
     Directory = 1,
     SymbolicLink = 2,
 }
+
+impl Default for FileType {
+    fn default() -> Self {
+        Self::File
+    }
+}
