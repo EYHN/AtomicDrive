@@ -1,11 +1,11 @@
 use crdts::{
-    ctx::{AddCtx, ReadCtx},
+    ctx::{AddCtx, ReadCtx, RmCtx},
     CmRDT, LWWReg, VClock,
 };
 use file::{FileFullPath, FileStats};
 use libp2p::PeerId;
 
-use crate::FileHashChunks;
+use crate::{FileHashChunks, VIndexReg};
 
 #[derive(Debug, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IndexedFile {
@@ -45,9 +45,7 @@ impl From<PeerId> for IndexPeerId {
     }
 }
 
-
-
-type IndexMap = crdts::Map<FileFullPath, LWWReg<IndexedFile, IndexOpMarker>, IndexPeerId>;
+type IndexMap = crdts::Map<FileFullPath, VIndexReg, IndexPeerId>;
 type IndexMapOp = <IndexMap as CmRDT>::Op;
 
 #[derive(Debug, Clone, Default)]
@@ -61,26 +59,24 @@ impl VIndex {
         &self,
         full_path: impl Into<FileFullPath>,
         file: IndexedFile,
-        marker: IndexOpMarker,
+        timestamp: u64,
+        peer_id: IndexPeerId,
         add_ctx: AddCtx<IndexPeerId>,
         item_add_ctx: Option<AddCtx<IndexPeerId>>,
     ) -> IndexMapOp {
         self.map.update(full_path, add_ctx, |v, add_ctx| {
-            v.write(file, marker, item_add_ctx.unwrap_or(add_ctx))
+            VIndexReg::new(file, timestamp, peer_id)
         })
     }
 
-    fn read(
-        &self,
-        full_path: &FileFullPath,
-    ) -> ReadCtx<Option<ReadCtx<Option<IndexedFile>, IndexPeerId>>, IndexPeerId> {
-        let read_ctx = self.map.get(&full_path);
+    fn read(&self, full_path: &FileFullPath) -> ReadCtx<Option<IndexedFile>, IndexPeerId> {
+        let read_ctx = self.map.get(full_path);
 
         if let Some(reg) = read_ctx.val {
             ReadCtx {
                 add_clock: read_ctx.add_clock,
                 rm_clock: read_ctx.rm_clock,
-                val: Some(reg.read_single()),
+                val: reg.val().cloned(),
             }
         } else {
             ReadCtx {
@@ -91,18 +87,8 @@ impl VIndex {
         }
     }
 
-    fn read_mutli(&self, full_path: &FileFullPath) -> ReadCtx<Vec<IndexedFile>, IndexPeerId> {
-        let read_ctx = self.map.get(&full_path);
-
-        if let Some(reg) = read_ctx.val {
-            return reg.read();
-        }
-
-        ReadCtx {
-            add_clock: read_ctx.add_clock,
-            rm_clock: read_ctx.rm_clock,
-            val: Vec::new(),
-        }
+    fn rm(&self, full_path: impl Into<FileFullPath>, rm_ctx: RmCtx<IndexPeerId>) -> IndexMapOp {
+        self.map.rm(full_path, rm_ctx)
     }
 
     fn read_ctx(&self) -> ReadCtx<(), IndexPeerId> {
@@ -146,7 +132,7 @@ mod tests {
     use file::FileFullPath;
     use libp2p::PeerId;
 
-    use crate::{IndexOpMarker, IndexPeerId, IndexedFile, VIndex};
+    use crate::{IndexPeerId, IndexedFile, VIndex};
 
     #[test]
     fn test_index() {
@@ -157,10 +143,8 @@ mod tests {
         device_1.apply(device_1.write(
             file_path.clone(),
             IndexedFile::quick_create_file(file_path.clone(), "test"),
-            IndexOpMarker {
-                timestamp: 1,
-                peer_id: device_1_peer_id,
-            },
+            1,
+            device_1_peer_id,
             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
             None,
         ));
@@ -168,10 +152,8 @@ mod tests {
         let device_1_write = device_1.write(
             file_path.clone(),
             IndexedFile::quick_create_file(file_path.clone(), "123"),
-            IndexOpMarker {
-                timestamp: 2,
-                peer_id: device_1_peer_id,
-            },
+            2,
+            device_1_peer_id,
             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
             None,
         );
@@ -179,10 +161,8 @@ mod tests {
         let device_2_write = device_2.write(
             file_path.clone(),
             IndexedFile::quick_create_file(file_path.clone(), "456"),
-            IndexOpMarker {
-                timestamp: 3,
-                peer_id: device_2_peer_id,
-            },
+            3,
+            device_2_peer_id,
             device_2.read_ctx().derive_add_ctx(device_2_peer_id),
             None,
         );
@@ -191,54 +171,62 @@ mod tests {
         device_2.apply(device_1_write);
 
         assert_eq!(
-            device_1.read(&file_path).val.unwrap().val.unwrap(),
+            device_1.read(&file_path).val.unwrap(),
             IndexedFile::quick_create_file(file_path.clone(), "456")
         );
         assert_eq!(
-            device_2.read(&file_path).val.unwrap().val.unwrap(),
+            device_2.read(&file_path).val.unwrap(),
             IndexedFile::quick_create_file(file_path.clone(), "456")
-        );
-        assert_eq!(
-            device_1.read_mutli(&file_path).val,
-            vec![
-                IndexedFile::quick_create_file(file_path.clone(), "123"),
-                IndexedFile::quick_create_file(file_path.clone(), "456")
-            ]
-        );
-        assert_eq!(
-            device_2.read_mutli(&file_path).val,
-            vec![
-                IndexedFile::quick_create_file(file_path.clone(), "456"),
-                IndexedFile::quick_create_file(file_path.clone(), "123"),
-            ]
         );
 
-        dbg!(device_1.read(&file_path));
-        dbg!(device_1.map.get(&file_path));
-        device_1.apply(
-            device_1.write(
-                file_path.clone(),
-                IndexedFile::quick_create_file(file_path.clone(), "789"),
-                IndexOpMarker {
-                    timestamp: 4,
-                    peer_id: device_1_peer_id,
-                },
-                device_1.read_ctx().derive_add_ctx(device_1_peer_id),
-                Some(
-                    device_1
-                        .read(&file_path)
-                        .val
-                        .unwrap()
-                        .derive_add_ctx(device_1_peer_id),
-                ),
-            ),
-        );
-        assert_eq!(
-            device_1.read_mutli(&file_path).val,
-            vec![
-                IndexedFile::quick_create_file(file_path.clone(), "123"),
-                IndexedFile::quick_create_file(file_path.clone(), "789")
-            ]
-        );
+        let device_1_rm = device_1.rm(file_path.clone(), device_1.read_ctx().derive_rm_ctx());
+
+        device_1.apply(device_1_rm.clone());
+        device_2.apply(device_1_rm);
+
+        assert_eq!(device_1.read(&file_path).val, None);
+        assert_eq!(device_2.read(&file_path).val, None);
+        // assert_eq!(
+        //     device_1.read_mutli(&file_path).val,
+        //     vec![
+        //         IndexedFile::quick_create_file(file_path.clone(), "123"),
+        //         IndexedFile::quick_create_file(file_path.clone(), "456")
+        //     ]
+        // );
+        // assert_eq!(
+        //     device_2.read_mutli(&file_path).val,
+        //     vec![
+        //         IndexedFile::quick_create_file(file_path.clone(), "456"),
+        //         IndexedFile::quick_create_file(file_path.clone(), "123"),
+        //     ]
+        // );
+
+        // dbg!(device_1.read(&file_path));
+        // dbg!(device_1.map.get(&file_path));
+        // device_1.apply(
+        //     device_1.write(
+        //         file_path.clone(),
+        //         IndexedFile::quick_create_file(file_path.clone(), "789"),
+        //         IndexOpMarker {
+        //             timestamp: 4,
+        //             peer_id: device_1_peer_id,
+        //         },
+        //         device_1.read_ctx().derive_add_ctx(device_1_peer_id),
+        //         Some(
+        //             device_1
+        //                 .read(&file_path)
+        //                 .val
+        //                 .unwrap()
+        //                 .derive_add_ctx(device_1_peer_id),
+        //         ),
+        //     ),
+        // );
+        // assert_eq!(
+        //     device_1.read_mutli(&file_path).val,
+        //     vec![
+        //         IndexedFile::quick_create_file(file_path.clone(), "123"),
+        //         IndexedFile::quick_create_file(file_path.clone(), "789")
+        //     ]
+        // );
     }
 }
