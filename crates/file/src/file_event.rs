@@ -14,6 +14,8 @@ pub enum FileEventType {
 
 #[derive(Debug, Clone, Hash, PartialEq)]
 pub struct FileEvent {
-    event_type: FileEventType,
-    path: FileFullPath,
+    pub event_type: FileEventType,
+    pub path: FileFullPath,
 }
+
+pub type FileEventCallback = Box<dyn Fn(Vec<FileEvent>) + Sync + Send + 'static>;

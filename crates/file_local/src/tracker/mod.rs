@@ -5,11 +5,10 @@
 
 mod error;
 
-use std::{ops::Deref, path::Path};
+use std::{collections::hash_map::DefaultHasher, hash::Hasher, ops::Deref, path::Path};
 
 use file::{FileFullPath, FileType};
 use rocksdb::Direction;
-use utils::EventEmitter;
 
 pub type Result<T> = std::result::Result<T, error::Error>;
 
@@ -17,7 +16,7 @@ type TransactionDB = rocksdb::TransactionDB<rocksdb::MultiThreaded>;
 
 #[derive(Debug)]
 enum Keys {
-    FilePath(FilePath),
+    FilePath(FileFullPath),
     FileInfo(FileIdentifier),
 }
 
@@ -29,8 +28,8 @@ impl Keys {
         }
     }
 
-    fn path_prefix(file_path: String) -> Vec<u8> {
-        let path_bytes = file_path.as_bytes();
+    fn path_prefix(path_prefix: String) -> Vec<u8> {
+        let path_bytes = path_prefix.as_bytes();
         debug_assert!(path_bytes[path_bytes.len() - 1] == b'/');
         let size = path_bytes.len() + 2;
         let mut bytes = Vec::with_capacity(size);
@@ -70,7 +69,7 @@ impl Keys {
 
         match label {
             b"r" => Ok(Self::FilePath(
-                String::from_utf8(args.into()).map_err(|_| error())?,
+                FileFullPath::from_bytes(args.into()).map_err(|_| error())?,
             )),
             b"f" => Ok(Self::FileInfo(args.to_vec())),
             _ => Err(error()),
@@ -124,7 +123,6 @@ impl Values {
 }
 
 type FileIdentifier = Vec<u8>;
-type FilePath = String;
 type FileName = String;
 type FileUpdateToken = Vec<u8>;
 
@@ -137,6 +135,53 @@ pub enum IndexInput {
         FileUpdateToken,
         Vec<(FileName, FileType, FileIdentifier, FileUpdateToken)>,
     ),
+    Empty(FileFullPath),
+}
+
+impl IndexInput {
+    pub fn new_file(path: FileFullPath, metadata: std::fs::Metadata) -> IndexInput {
+        IndexInput::File(
+            path,
+            metadata.file_type().into(),
+            Self::calc_file_identifier(&metadata),
+            Self::calc_file_update_token(&metadata),
+        )
+    }
+
+    pub fn new_empty(path: FileFullPath) -> IndexInput {
+        IndexInput::Empty(path)
+    }
+
+    pub fn new_directory(
+        path: FileFullPath,
+        metadata: std::fs::Metadata,
+        children: Vec<(FileName, std::fs::Metadata)>,
+    ) {
+        IndexInput::Directory(
+            path,
+            Self::calc_file_identifier(&metadata),
+            Self::calc_file_update_token(&metadata),
+            children.into_iter().map(|c|),
+        )
+    }
+
+    fn calc_file_identifier(metadata: &std::fs::Metadata) -> FileIdentifier {
+        let mut hasher: DefaultHasher = DefaultHasher::new();
+        std::hash::Hash::hash(&metadata.file_type(), &mut hasher);
+        hasher.finish().to_be_bytes().to_vec()
+    }
+
+    fn calc_file_update_token(metadata: &std::fs::Metadata) -> FileUpdateToken {
+        let mut hasher = DefaultHasher::new();
+        std::hash::Hash::hash(&metadata.len(), &mut hasher);
+        if let Ok(time) = metadata.created() {
+            std::hash::Hash::hash(&time, &mut hasher);
+        }
+        if let Ok(time) = metadata.modified() {
+            std::hash::Hash::hash(&time, &mut hasher);
+        }
+        hasher.finish().to_be_bytes().to_vec()
+    }
 }
 
 #[derive(Debug)]
@@ -147,23 +192,39 @@ pub enum EventType {
 }
 
 #[derive(Debug)]
-pub struct Event {
+pub struct LocalFileSystemTrackerEvent {
     pub event_type: EventType,
     pub file_identifier: FileIdentifier,
-    pub file_path: FilePath,
+    pub file_path: FileFullPath,
 }
 
-pub type EventPack = Vec<Event>;
+impl From<LocalFileSystemTrackerEvent> for file::FileEvent {
+    fn from(value: LocalFileSystemTrackerEvent) -> Self {
+        Self {
+            event_type: match value.event_type {
+                EventType::FilePathCreate => file::FileEventType::Created,
+                EventType::FilePathUpdate => file::FileEventType::Changed,
+                EventType::FilePathDelete => file::FileEventType::Deleted,
+            },
+            path: value.file_path,
+        }
+    }
+}
 
-pub struct Database {
+pub type LocalFileSystemTrackerEventPack = Vec<LocalFileSystemTrackerEvent>;
+
+pub type LocalFileSystemTrackerCallback =
+    Box<dyn Fn(LocalFileSystemTrackerEventPack) + Send + Sync + 'static>;
+
+pub struct LocalFileSystemTracker {
     db: TransactionDB,
-    event_emitter: EventEmitter<EventPack>,
+    callback: LocalFileSystemTrackerCallback,
 }
 
-impl Database {
-    pub fn open_or_create(
+impl LocalFileSystemTracker {
+    pub fn open_or_create_database(
         path: impl AsRef<Path>,
-        event_emitter: EventEmitter<EventPack>,
+        cb: LocalFileSystemTrackerCallback,
     ) -> Result<Self> {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
@@ -171,10 +232,10 @@ impl Database {
         t_opts.set_default_lock_timeout(5000);
 
         let db = TransactionDB::open(&opts, &t_opts, path)?;
-        Ok(Self { db, event_emitter })
+        Ok(Self { db, callback: cb })
     }
 
-    pub fn drop(path: impl AsRef<Path>) -> Result<()> {
+    pub fn drop_database(path: impl AsRef<Path>) -> Result<()> {
         let opts = rocksdb::Options::default();
         TransactionDB::destroy(&opts, path)?;
         Ok(())
@@ -186,13 +247,13 @@ impl Database {
 
         fn explore(
             operation: &Operation,
-            file_path: FilePath,
+            file_path: FileFullPath,
             prev_file: Option<(FileType, FileIdentifier)>,
             next_file: Option<(FileType, FileIdentifier, FileUpdateToken)>,
             depth: bool,
-            create: &mut Vec<(FilePath, FileType, FileIdentifier, FileUpdateToken)>,
-            update: &mut Vec<(FilePath, FileType, FileIdentifier, FileUpdateToken)>,
-            delete: &mut Vec<(FilePath, FileType, FileIdentifier)>,
+            create: &mut Vec<(FileFullPath, FileType, FileIdentifier, FileUpdateToken)>,
+            update: &mut Vec<(FileFullPath, FileType, FileIdentifier, FileUpdateToken)>,
+            delete: &mut Vec<(FileFullPath, FileType, FileIdentifier)>,
         ) -> Result<()> {
             if let Some((prev_file_type, prev_file_id)) = prev_file {
                 if let Some((next_file_type, next_file_id, next_file_update_token)) = next_file {
@@ -216,7 +277,7 @@ impl Database {
                 delete.push((file_path.clone(), prev_file_type, prev_file_id));
 
                 if depth {
-                    let children_prefix = if file_path == "/" {
+                    let children_prefix = if file_path.to_string() == "/" {
                         "/".to_owned()
                     } else {
                         format!("{file_path}/")
@@ -248,10 +309,10 @@ impl Database {
 
         fn execute(
             operation: &Operation,
-            event_emitter: &EventEmitter<EventPack>,
-            create: Vec<(FilePath, FileType, FileIdentifier, FileUpdateToken)>,
-            update: Vec<(FilePath, FileType, FileIdentifier, FileUpdateToken)>,
-            delete: Vec<(FilePath, FileType, FileIdentifier)>,
+            callback: &LocalFileSystemTrackerCallback,
+            create: Vec<(FileFullPath, FileType, FileIdentifier, FileUpdateToken)>,
+            update: Vec<(FileFullPath, FileType, FileIdentifier, FileUpdateToken)>,
+            delete: Vec<(FileFullPath, FileType, FileIdentifier)>,
         ) -> Result<()> {
             let fetch_size = update.len() + create.len() + delete.len();
             let mut file_handle_list = Vec::with_capacity(fetch_size);
@@ -264,15 +325,15 @@ impl Database {
             let (create_file_tokens, other_file_tokens) = fetched_infos.split_at(create.len());
             let (update_file_tokens, _delete_file_infos) = other_file_tokens.split_at(update.len());
 
-            let mut create_events = EventPack::new();
-            let mut delete_events = EventPack::new();
-            let mut update_events = EventPack::new();
+            let mut create_events = LocalFileSystemTrackerEventPack::new();
+            let mut delete_events = LocalFileSystemTrackerEventPack::new();
+            let mut update_events = LocalFileSystemTrackerEventPack::new();
 
             for (file_path, _, file_id) in delete.into_iter() {
                 operation.delete_file_path(file_path.clone())?;
                 operation.delete_file_info(file_id.clone())?;
 
-                delete_events.push(Event {
+                delete_events.push(LocalFileSystemTrackerEvent {
                     event_type: EventType::FilePathDelete,
                     file_path,
                     file_identifier: file_id,
@@ -297,7 +358,7 @@ impl Database {
                     operation.put_file_info(file_id.clone(), file_update_token)?;
                 }
 
-                create_events.push(Event {
+                create_events.push(LocalFileSystemTrackerEvent {
                     event_type: EventType::FilePathCreate,
                     file_path,
                     file_identifier: file_id,
@@ -310,7 +371,7 @@ impl Database {
                 if let Some(old_file_info) = old_file_info {
                     if old_file_info != &file_update_token {
                         operation.put_file_info(file_id.clone(), file_update_token)?;
-                        update_events.push(Event {
+                        update_events.push(LocalFileSystemTrackerEvent {
                             event_type: EventType::FilePathUpdate,
                             file_path,
                             file_identifier: file_id,
@@ -324,7 +385,7 @@ impl Database {
 
             delete_events.append(&mut create_events);
             delete_events.append(&mut update_events);
-            event_emitter.notify(&delete_events);
+            callback(delete_events);
 
             Ok(())
         }
@@ -337,12 +398,11 @@ impl Database {
 
         match input {
             IndexInput::File(file_full_path, file_type, file_id, file_update_token) => {
-                let file_path = String::from(file_full_path);
-                let prev_file = operation.get_for_update_file_path(file_path.clone())?;
+                let prev_file = operation.get_for_update_file_path(file_full_path.clone())?;
 
                 explore(
                     &operation,
-                    file_path,
+                    file_full_path,
                     prev_file,
                     Some((file_type, file_id, file_update_token)),
                     true,
@@ -351,12 +411,25 @@ impl Database {
                     &mut delete,
                 )?;
             }
-            IndexInput::Directory(file_full_path, file_id, file_update_token, mut children) => {
-                let file_path = String::from(file_full_path);
-                let prev_file = operation.get_for_update_file_path(file_path.clone())?;
+            IndexInput::Empty(file_full_path) => {
+                let prev_file = operation.get_for_update_file_path(file_full_path.clone())?;
+
                 explore(
                     &operation,
-                    file_path.clone(),
+                    file_full_path,
+                    prev_file,
+                    None,
+                    true,
+                    &mut create,
+                    &mut update,
+                    &mut delete,
+                )?;
+            }
+            IndexInput::Directory(file_full_path, file_id, file_update_token, mut children) => {
+                let prev_file = operation.get_for_update_file_path(file_full_path.clone())?;
+                explore(
+                    &operation,
+                    file_full_path.clone(),
                     prev_file,
                     Some((FileType::Directory, file_id, file_update_token)),
                     false,
@@ -365,10 +438,10 @@ impl Database {
                     &mut delete,
                 )?;
 
-                let children_prefix = if file_path == "/" {
+                let children_prefix = if file_full_path.to_string() == "/" {
                     "/".to_owned()
                 } else {
-                    format!("{file_path}/")
+                    format!("{file_full_path}/")
                 };
                 let prev_children = operation.get_for_update_directory(children_prefix.clone())?;
 
@@ -389,7 +462,7 @@ impl Database {
                 }
 
                 for (name, prev_child, child) in diff {
-                    let file_path = format!("{children_prefix}{name}");
+                    let file_path = FileFullPath::parse(&format!("{children_prefix}{name}"));
                     let prev_file = prev_child.map(|prev_child| (prev_child.1, prev_child.2));
                     let next_file = child.map(|child| (child.1, child.2, child.3));
                     explore(
@@ -406,7 +479,7 @@ impl Database {
             }
         }
 
-        execute(&operation, &self.event_emitter, create, update, delete)?;
+        execute(&operation, &self.callback, create, update, delete)?;
         operation.commit()?;
         Ok(())
     }
@@ -442,7 +515,7 @@ impl Operation<'_> {
 
     fn get_for_update_file_path_batch(
         &self,
-        file_path: Vec<FilePath>,
+        file_path: Vec<FileFullPath>,
     ) -> Result<Vec<Option<(FileType, FileIdentifier)>>> {
         let mut keys = Vec::with_capacity(file_path.len());
         for file_path in file_path {
@@ -466,7 +539,7 @@ impl Operation<'_> {
 
     fn get_for_update_file_path(
         &self,
-        file_path: FilePath,
+        file_path: FileFullPath,
     ) -> Result<Option<(FileType, FileIdentifier)>> {
         let key = Keys::FilePath(file_path);
         let value = self.get_for_update(key.to_bytes()?, true)?;
@@ -513,9 +586,9 @@ impl Operation<'_> {
 
     fn get_for_update_all_children_paths(
         &self,
-        file_path: FilePath,
-    ) -> Result<Vec<(FilePath, FileType, FileIdentifier)>> {
-        let prefix = Keys::path_prefix(file_path);
+        children_prefix: String,
+    ) -> Result<Vec<(FileFullPath, FileType, FileIdentifier)>> {
+        let prefix = Keys::path_prefix(children_prefix);
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
         let mut read_opt = rocksdb::ReadOptions::default();
@@ -540,9 +613,9 @@ impl Operation<'_> {
 
     fn get_for_update_directory(
         &self,
-        directory_file_path: FilePath,
+        directory_prefix: String,
     ) -> Result<Vec<(FileName, FileType, FileIdentifier)>> {
-        let prefix = Keys::path_prefix(directory_file_path.clone());
+        let prefix: Vec<u8> = Keys::path_prefix(directory_prefix.clone());
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
         let mut read_opt = rocksdb::ReadOptions::default();
@@ -552,7 +625,7 @@ impl Operation<'_> {
             read_opt,
         );
 
-        let base_path_len = directory_file_path.len();
+        let base_path_len = directory_prefix.len();
 
         let mut result = Vec::new();
         loop {
@@ -560,17 +633,16 @@ impl Operation<'_> {
             if let Some(row) = row {
                 let (key_bytes, _) = row?;
                 if let Keys::FilePath(file_path) = Keys::parse(&key_bytes)? {
-                    if file_path == directory_file_path {
+                    let file_path_str = file_path.to_string();
+                    if file_path_str == directory_prefix {
                         continue;
                     }
-                    let suffix = &file_path[base_path_len..];
+                    let suffix = &file_path_str[base_path_len..];
                     let slash_position = suffix.chars().position(|a| a == '/');
                     if let Some(slash_position) = slash_position {
-                        let mut next: Vec<u8> = Keys::FilePath(
-                            (&file_path[0..slash_position + base_path_len + 1]).to_owned(),
-                        )
-                        .to_bytes()?;
-                        debug_assert!(next.last() == Some(&b'/'));
+                        let mut next: Vec<u8> = Keys::path_prefix(
+                            (&file_path_str[0..slash_position + base_path_len + 1]).to_owned(),
+                        );
                         *next.last_mut().unwrap() += 1;
                         iter.set_mode(rocksdb::IteratorMode::From(&next, Direction::Forward))
                     } else {
@@ -615,7 +687,7 @@ impl Operation<'_> {
 
     fn put_file_path(
         &self,
-        file_path: FilePath,
+        file_path: FileFullPath,
         file_type: FileType,
         file_id: FileIdentifier,
     ) -> Result<()> {
@@ -629,7 +701,7 @@ impl Operation<'_> {
         Ok(self.delete(key)?)
     }
 
-    fn delete_file_path(&self, file_path: FilePath) -> Result<()> {
+    fn delete_file_path(&self, file_path: FileFullPath) -> Result<()> {
         let key = Keys::FilePath(file_path).to_bytes()?;
         Ok(self.delete(key)?)
     }

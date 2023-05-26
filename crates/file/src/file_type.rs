@@ -17,6 +17,18 @@ pub enum FileType {
     SymbolicLink = 2,
 }
 
+impl From<std::fs::FileType> for FileType {
+    fn from(value: std::fs::FileType) -> Self {
+        if value.is_symlink() {
+            Self::SymbolicLink
+        } else if value.is_dir() {
+            Self::Directory
+        } else {
+            Self::File
+        }
+    }
+}
+
 impl Default for FileType {
     fn default() -> Self {
         Self::File

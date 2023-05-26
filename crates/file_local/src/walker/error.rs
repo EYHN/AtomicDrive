@@ -2,7 +2,7 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum Error {
-    WalkdirError(walkdir::Error),
+    IOError(std::io::Error),
 }
 
 impl fmt::Display for Error {
@@ -15,14 +15,14 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self {
-            Error::WalkdirError(e) => Some(e),
+            Error::IOError(e) => Some(e),
             _ => None,
         }
     }
 }
 
-impl From<walkdir::Error> for Error {
-    fn from(err: walkdir::Error) -> Self {
-        Self::WalkdirError(err)
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Self::IOError(err)
     }
 }

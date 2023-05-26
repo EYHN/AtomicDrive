@@ -8,7 +8,6 @@ file = { path = "../file" }
 utils = { path = "../utils" }
 notify = { version = "5.1.0", features = ["serde"] }
 rocksdb = { version = "0.20", features = ["lz4"], default-features = false }
-walkdir = "2"
 
 [dev-dependencies]
 test-results = "0.1.2"

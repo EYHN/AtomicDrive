@@ -1,17 +1,15 @@
 use file::{FileFullPath, FileType};
-use utils::{bytes_stringify, EventEmitter};
+use utils::bytes_stringify;
 
-use crate::db::EventPack;
-
-use super::Database;
+use super::LocalFileSystemTracker;
 
 #[test]
 fn test() {
     let db_dir = test_results::save_dir!("tracker_db");
     std::fs::remove_dir_all(&db_dir).unwrap();
-    let db = Database::open_or_create(
+    let db = LocalFileSystemTracker::open_or_create_database(
         &db_dir,
-        EventEmitter::<EventPack>::new(|events| {
+        Box::new(|events| {
             for event in events.iter() {
                 println!(
                     "event!: {:?} {} [{}]",
@@ -24,42 +22,42 @@ fn test() {
     )
     .unwrap();
 
-    db.index(crate::db::IndexInput::File(
+    db.index(crate::tracker::IndexInput::File(
         FileFullPath::parse("/test/a"),
         FileType::File,
         b"test_file_a".to_vec(),
         b"1".to_vec(),
     ))
     .unwrap();
-    db.index(crate::db::IndexInput::File(
+    db.index(crate::tracker::IndexInput::File(
         FileFullPath::parse("/test/b"),
         FileType::File,
         b"test_file_b".to_vec(),
         b"1".to_vec(),
     ))
     .unwrap();
-    db.index(crate::db::IndexInput::File(
+    db.index(crate::tracker::IndexInput::File(
         FileFullPath::parse("/test/b/1"),
         FileType::File,
         b"test_file_b1".to_vec(),
         b"1".to_vec(),
     ))
     .unwrap();
-    db.index(crate::db::IndexInput::File(
+    db.index(crate::tracker::IndexInput::File(
         FileFullPath::parse("/test/b/2"),
         FileType::File,
         b"test_file_b1".to_vec(),
         b"1".to_vec(),
     ))
     .unwrap();
-    db.index(crate::db::IndexInput::File(
+    db.index(crate::tracker::IndexInput::File(
         FileFullPath::parse("/test/c"),
         FileType::File,
         b"test_file_c".to_vec(),
         b"1".to_vec(),
     ))
     .unwrap();
-    db.index(crate::db::IndexInput::File(
+    db.index(crate::tracker::IndexInput::File(
         FileFullPath::parse("/test/c;1"),
         FileType::File,
         b"test_file_c;1".to_vec(),
@@ -67,7 +65,7 @@ fn test() {
     ))
     .unwrap();
 
-    db.index(crate::db::IndexInput::Directory(
+    db.index(crate::tracker::IndexInput::Directory(
         FileFullPath::parse("/test"),
         b"test_dir".to_vec(),
         b"1".to_vec(),
