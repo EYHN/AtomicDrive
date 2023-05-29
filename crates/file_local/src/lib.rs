@@ -63,12 +63,21 @@ impl LocalFileSystem {
     }
 
     pub fn walk(&self) {
+        let tracker = self.tracker.lock().unwrap();
         let mut walker = self.walker.lock().unwrap();
-        walker.start_new_walking();
-        for file in walker.iter() {
-            // if Ok((path, file_type, metadata)) = file {
-
-            // }
+        walker.start_new_walking().unwrap();
+        for item in walker.iter() {
+            if let Ok(item) = item {
+                tracker
+                    .index(tracker::IndexInput::new_directory(
+                        FileFullPath::parse(&item.path.to_string_lossy()),
+                        item.metadata,
+                        item.children.into_iter().map(|(filename, metadata)| {
+                            (filename.to_string_lossy().to_string(), metadata)
+                        }),
+                    ))
+                    .unwrap();
+            }
         }
     }
 }
@@ -88,5 +97,26 @@ fn file_path_to_index(path: &PathBuf) -> std::io::Result<tracker::IndexInput> {
                 Err(err)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::LocalFileSystem;
+
+    #[test]
+    fn test() {
+        let fs = LocalFileSystem::new(
+            Box::new(|ev| {
+                dbg!(ev);
+            }),
+            crate::LocalFileSystemConfiguration {
+                root: PathBuf::from("/Users/admin/Projects/AtomicDrive/crates/file_local/src"),
+                data_dir: PathBuf::from("/Users/admin/Projects/AtomicDrive/cache"),
+            },
+        );
+        fs.walk();
     }
 }

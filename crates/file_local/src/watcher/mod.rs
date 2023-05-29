@@ -25,20 +25,24 @@ impl LocalFileSystemWatcher {
                 Err(e) => println!("watch error: {:?}", e),
             })?;
 
-        Ok(Self {
+        let mut watcher = Self {
             base_path,
             watcher: Box::new(watcher),
-        })
+        };
+
+        watcher.watch()?;
+
+        Ok(watcher)
     }
 
     pub fn watch(&mut self) -> Result<()> {
         self.watcher
-            .watch(Path::new("."), notify::RecursiveMode::Recursive)?;
+            .watch(&self.base_path, notify::RecursiveMode::Recursive)?;
         Ok(())
     }
 
     pub fn unwatch(&mut self) -> Result<()> {
-        self.watcher.unwatch(Path::new("."))?;
+        self.watcher.unwatch(&self.base_path)?;
         Ok(())
     }
 }

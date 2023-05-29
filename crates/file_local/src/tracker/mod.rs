@@ -155,13 +155,23 @@ impl IndexInput {
     pub fn new_directory(
         path: FileFullPath,
         metadata: std::fs::Metadata,
-        children: Vec<(FileName, std::fs::Metadata)>,
-    ) {
+        children: impl Iterator<Item = (FileName, std::fs::Metadata)>,
+    ) -> IndexInput {
         IndexInput::Directory(
             path,
             Self::calc_file_identifier(&metadata),
             Self::calc_file_update_token(&metadata),
-            children.into_iter().map(|c|),
+            children
+                .into_iter()
+                .map(|(file_name, metadata)| {
+                    (
+                        file_name,
+                        metadata.file_type().into(),
+                        Self::calc_file_identifier(&metadata),
+                        Self::calc_file_update_token(&metadata),
+                    )
+                })
+                .collect(),
         )
     }
 
