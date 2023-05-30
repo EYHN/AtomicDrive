@@ -5,7 +5,7 @@
 
 mod error;
 
-use std::{collections::hash_map::DefaultHasher, hash::Hasher, ops::Deref, path::Path};
+use std::{ops::Deref, path::Path};
 
 use file::{FileFullPath, FileType};
 use rocksdb::Direction;
@@ -136,62 +136,6 @@ pub enum IndexInput {
         Vec<(FileName, FileType, FileIdentifier, FileUpdateToken)>,
     ),
     Empty(FileFullPath),
-}
-
-impl IndexInput {
-    pub fn new_file(path: FileFullPath, metadata: std::fs::Metadata) -> IndexInput {
-        IndexInput::File(
-            path,
-            metadata.file_type().into(),
-            Self::calc_file_identifier(&metadata),
-            Self::calc_file_update_token(&metadata),
-        )
-    }
-
-    pub fn new_empty(path: FileFullPath) -> IndexInput {
-        IndexInput::Empty(path)
-    }
-
-    pub fn new_directory(
-        path: FileFullPath,
-        metadata: std::fs::Metadata,
-        children: impl Iterator<Item = (FileName, std::fs::Metadata)>,
-    ) -> IndexInput {
-        IndexInput::Directory(
-            path,
-            Self::calc_file_identifier(&metadata),
-            Self::calc_file_update_token(&metadata),
-            children
-                .into_iter()
-                .map(|(file_name, metadata)| {
-                    (
-                        file_name,
-                        metadata.file_type().into(),
-                        Self::calc_file_identifier(&metadata),
-                        Self::calc_file_update_token(&metadata),
-                    )
-                })
-                .collect(),
-        )
-    }
-
-    fn calc_file_identifier(metadata: &std::fs::Metadata) -> FileIdentifier {
-        let mut hasher: DefaultHasher = DefaultHasher::new();
-        std::hash::Hash::hash(&metadata.file_type(), &mut hasher);
-        hasher.finish().to_be_bytes().to_vec()
-    }
-
-    fn calc_file_update_token(metadata: &std::fs::Metadata) -> FileUpdateToken {
-        let mut hasher = DefaultHasher::new();
-        std::hash::Hash::hash(&metadata.len(), &mut hasher);
-        if let Ok(time) = metadata.created() {
-            std::hash::Hash::hash(&time, &mut hasher);
-        }
-        if let Ok(time) = metadata.modified() {
-            std::hash::Hash::hash(&time, &mut hasher);
-        }
-        hasher.finish().to_be_bytes().to_vec()
-    }
 }
 
 #[derive(Debug)]

@@ -11,38 +11,37 @@ pub type Result<T> = std::result::Result<T, error::Error>;
 
 pub struct LocalFileSystemWatcher {
     base_path: PathBuf,
-    watcher: Box<dyn notify::Watcher>,
+    watcher: Option<Box<dyn notify::Watcher>>,
+    cb: Arc<dyn Fn(Vec<PathBuf>) + Send + Sync + 'static>,
 }
 
 impl LocalFileSystemWatcher {
-    pub fn new(
-        base_path: PathBuf,
-        cb: Box<dyn Fn(Vec<PathBuf>) + Send + Sync + 'static>,
-    ) -> Result<Self> {
-        let watcher =
-            notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
-                Ok(event) => cb(event.paths),
-                Err(e) => println!("watch error: {:?}", e),
-            })?;
-
-        let mut watcher = Self {
+    pub fn new(base_path: PathBuf, cb: Box<dyn Fn(Vec<PathBuf>) + Send + Sync + 'static>) -> Self {
+        Self {
             base_path,
-            watcher: Box::new(watcher),
-        };
-
-        watcher.watch()?;
-
-        Ok(watcher)
+            watcher: None,
+            cb: Arc::from(cb),
+        }
     }
 
     pub fn watch(&mut self) -> Result<()> {
-        self.watcher
-            .watch(&self.base_path, notify::RecursiveMode::Recursive)?;
+        self.unwatch();
+        let cb = self.cb.clone();
+        let mut watcher = Box::new(notify::recommended_watcher(
+            move |res: notify::Result<notify::Event>| match res {
+                Ok(event) => cb(event.paths),
+                Err(e) => println!("watch error: {:?}", e),
+            },
+        )?);
+        watcher.watch(&self.base_path, notify::RecursiveMode::Recursive)?;
+        self.watcher = Some(watcher);
         Ok(())
     }
 
     pub fn unwatch(&mut self) -> Result<()> {
-        self.watcher.unwatch(&self.base_path)?;
+        if let Some(ref mut watcher) = self.watcher {
+            watcher.unwatch(&self.base_path)?;
+        }
         Ok(())
     }
 }
