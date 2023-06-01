@@ -4,12 +4,12 @@ use sha2::{Digest, Sha256};
 use utils::bytes_stringify;
 
 #[derive(Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct FileHashChunks {
+pub struct HashChunks {
     chunks: Vec<HashChunk>,
     hash: [u8; 16],
 }
 
-impl Debug for FileHashChunks {
+impl Debug for HashChunks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileHashChunks")
             .field("chunks", &self.chunks)
@@ -33,7 +33,7 @@ impl Debug for HashChunk {
     }
 }
 
-fn chunks(data: &[u8]) -> FileHashChunks {
+fn chunks(data: &[u8]) -> HashChunks {
     let chunker = fastcdc::v2020::FastCDC::new(
         data, 65536,  /* 64 KiB */
         131072, /* 128 KiB */
@@ -53,7 +53,7 @@ fn chunks(data: &[u8]) -> FileHashChunks {
         })
     }
 
-    FileHashChunks {
+    HashChunks {
         hash: {
             let mut fileHash = Sha256::new();
             for chunk in chunks.iter() {

@@ -9,6 +9,88 @@ fn is_path_separator(code: &char) -> bool {
 impl PathTools {
     pub const DIRECTORY_SEPARATOR_CHAR: char = '/';
 
+    pub fn relative(from: &str, to: &str) -> Cow<'static, str> {
+        if from == to {
+            return Cow::Borrowed("");
+        }
+
+        // Trim leading forward slashes.
+        let from = PathTools::resolve_iter([from].into_iter());
+        let to = PathTools::resolve_iter([to].into_iter());
+
+        if from == to {
+            return Cow::Borrowed("");
+        }
+
+        let from_start = 1;
+        let from_end = from.len();
+        let from_len = from_end - from_start;
+        let to_start = 1;
+        let to_len = to.len() - to_start;
+
+        // Compare paths to find the longest common path from root
+        let length = if from_len < to_len { from_len } else { to_len };
+        let mut last_common_sep: Option<usize> = None;
+        let mut i = 0;
+        loop {
+            if i >= length {
+                break;
+            }
+            let from_code = from.chars().nth(from_start + i);
+            if from_code != to.chars().nth(to_start + i) {
+                break;
+            } else if from_code == Some(PathTools::DIRECTORY_SEPARATOR_CHAR) {
+                last_common_sep = Some(i);
+            }
+            i += 1;
+        }
+        if i == length {
+            if to_len > length {
+                if to.chars().nth(to_start + i) == Some(PathTools::DIRECTORY_SEPARATOR_CHAR) {
+                    // We get here if `from` is the exact base path for `to`.
+                    // For example: from='/foo/bar'; to='/foo/bar/baz'
+                    return Cow::Owned(to[to_start + i + 1..].to_string());
+                }
+                if i == 0 {
+                    // We get here if `from` is the root
+                    // For example: from='/'; to='/foo'
+                    return Cow::Owned(to[to_start + i..].to_string());
+                }
+            } else if from_end > length {
+                if from.chars().nth(from_start + i) == Some(PathTools::DIRECTORY_SEPARATOR_CHAR) {
+                    // We get here if `to` is the exact base path for `from`.
+                    // For example: from='/foo/bar/baz'; to='/foo/bar'
+                    last_common_sep = Some(i);
+                } else if i == 0 {
+                    // We get here if `to` is the root.
+                    // For example: from='/foo/bar'; to='/'
+                    last_common_sep = Some(0);
+                }
+            }
+        }
+
+        let mut out = String::new();
+        // Generate the relative path based on the path difference between `to`
+        // and `from`.
+        let last_common_sep = last_common_sep.map(|i| i as isize).unwrap_or(-1);
+        let mut i = from_start.checked_add_signed(last_common_sep + 1).unwrap();
+        loop {
+            if i > from_end {
+                break;
+            }
+            if i == from_end || from.chars().nth(i) == Some(PathTools::DIRECTORY_SEPARATOR_CHAR) {
+                out.push_str(if out.len() == 0 { ".." } else { "/.." });
+            }
+
+            i += 1;
+        }
+
+        // Lastly, append the rest of the destination (`to`) path that comes after
+        // the common path parts.
+        out.push_str(&to[to_start.checked_add_signed(last_common_sep).unwrap()..]);
+        return Cow::Owned(out);
+    }
+
     pub fn resolve(segment1: &str, segment2: &str) -> Cow<'static, str> {
         PathTools::resolve_iter([segment1, segment2].into_iter())
     }
@@ -537,5 +619,34 @@ mod tests {
         assert_eq!("/", PathTools::dirname("////"));
         assert_eq!("//", PathTools::dirname("//a"));
         assert_eq!(".", PathTools::dirname("foo"));
+    }
+
+    #[test]
+    fn relative_test() {
+        assert_eq!("..", PathTools::relative("/var/lib", "/var"));
+        assert_eq!("../../bin", PathTools::relative("/var/lib", "/bin"));
+        assert_eq!("", PathTools::relative("/var/lib", "/var/lib"));
+        assert_eq!("../apache", PathTools::relative("/var/lib", "/var/apache"));
+        assert_eq!("lib", PathTools::relative("/var/", "/var/lib"));
+        assert_eq!("var/lib", PathTools::relative("/", "/var/lib",));
+        assert_eq!(
+            "bar/package.json",
+            PathTools::relative("/foo/test", "/foo/test/bar/package.json")
+        );
+        assert_eq!(
+            "../..",
+            PathTools::relative("/Users/a/web/b/test/mails", "/Users/a/web/b")
+        );
+        assert_eq!(
+            "../baz",
+            PathTools::relative("/foo/bar/baz-quux", "/foo/bar/baz")
+        );
+        assert_eq!(
+            "../baz-quux",
+            PathTools::relative("/foo/bar/baz", "/foo/bar/baz-quux")
+        );
+        assert_eq!("../baz", PathTools::relative("/baz-quux", "/baz"));
+        assert_eq!("../baz-quux", PathTools::relative("/baz", "/baz-quux"));
+        assert_eq!("../../..", PathTools::relative("/page1/page2/foo", "/"));
     }
 }

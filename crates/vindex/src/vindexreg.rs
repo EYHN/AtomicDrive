@@ -1,6 +1,6 @@
 use crdts::{CmRDT, CvRDT, LWWReg, ResetRemove, VClock};
 
-use crate::{IndexPeerId, IndexedFile};
+use crate::IndexPeerId;
 
 #[derive(Debug, Hash, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VIndexRegMarker {
@@ -27,23 +27,23 @@ impl PartialOrd for VIndexRegMarker {
     }
 }
 
-type LWW = LWWReg<IndexedFile, VIndexRegMarker>;
+type LWW<IndexedObject> = LWWReg<IndexedObject, VIndexRegMarker>;
 
 #[derive(Debug, Default, Hash, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct VIndexReg {
-    lww: Option<LWW>,
+pub struct VIndexReg<IndexedObject> {
+    lww: Option<LWW<IndexedObject>>,
 }
 
-impl VIndexReg {
+impl<IndexedObject> VIndexReg<IndexedObject> {
     pub fn new(
-        file: IndexedFile,
+        obj: IndexedObject,
         clock: VClock<IndexPeerId>,
         timestamp: u64,
         peer_id: IndexPeerId,
     ) -> Self {
         VIndexReg {
             lww: Some(LWW {
-                val: file,
+                val: obj,
                 marker: VIndexRegMarker {
                     clock,
                     timestamp,
@@ -53,7 +53,7 @@ impl VIndexReg {
         }
     }
 
-    pub fn val(&self) -> Option<&IndexedFile> {
+    pub fn val(&self) -> Option<&IndexedObject> {
         if let Some(lww) = &self.lww {
             Some(&lww.val)
         } else {
@@ -62,7 +62,7 @@ impl VIndexReg {
     }
 }
 
-impl PartialOrd for VIndexReg {
+impl<IndexedObject: PartialEq> PartialOrd for VIndexReg<IndexedObject> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         if let Some(lww) = self.lww.as_ref() {
             if let Some(other) = other.lww.as_ref() {
@@ -80,8 +80,8 @@ impl PartialOrd for VIndexReg {
     }
 }
 
-impl CvRDT for VIndexReg {
-    type Validation = <LWW as CvRDT>::Validation;
+impl<IndexedObject: PartialEq> CvRDT for VIndexReg<IndexedObject> {
+    type Validation = <LWW<IndexedObject> as CvRDT>::Validation;
 
     fn validate_merge(&self, other: &Self) -> Result<(), Self::Validation> {
         if let Some(lww) = self.lww.as_ref() {
@@ -105,10 +105,10 @@ impl CvRDT for VIndexReg {
     }
 }
 
-impl CmRDT for VIndexReg {
+impl<IndexedObject: PartialEq> CmRDT for VIndexReg<IndexedObject> {
     type Op = Self;
 
-    type Validation = <LWW as CmRDT>::Validation;
+    type Validation = <LWW<IndexedObject> as CmRDT>::Validation;
 
     fn validate_op(&self, op: &Self::Op) -> Result<(), Self::Validation> {
         if let Some(lww) = self.lww.as_ref() {
@@ -132,7 +132,7 @@ impl CmRDT for VIndexReg {
     }
 }
 
-impl<A: Ord> ResetRemove<A> for VIndexReg {
+impl<A: Ord, IndexedObject> ResetRemove<A> for VIndexReg<IndexedObject> {
     fn reset_remove(&mut self, clock: &crdts::VClock<A>) {
         // not need
     }

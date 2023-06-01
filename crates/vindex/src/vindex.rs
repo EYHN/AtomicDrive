@@ -1,36 +1,35 @@
+use std::fmt::Debug;
+
 use crdts::{
     ctx::{AddCtx, ReadCtx, RmCtx},
     CmRDT, Dot, VClock,
 };
-use file::{FileFullPath, FileStats};
 use libp2p::PeerId;
 
-use crate::{FileHashChunks, VIndexReg};
+use crate::VIndexReg;
 
-#[derive(Debug, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct IndexedFile {
-    pub path: FileFullPath,
-    pub content: IndexedFileContent,
-    pub stats: FileStats,
-}
+// #[derive(Debug, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+// pub struct IndexedObject {
+//     pub content: IndexedFileContent,
+//     // pub stats: FileStats,
+// }
 
-impl IndexedFile {
-    fn quick_create_file(path: FileFullPath, content: &str) -> Self {
-        IndexedFile {
-            path,
-            content: IndexedFileContent::SmallFileContent(
-                content.as_bytes().to_owned().into_boxed_slice(),
-            ),
-            stats: Default::default(),
-        }
-    }
-}
+// impl IndexedObject {
+//     fn quick_create_file(content: &str) -> Self {
+//         IndexedObject {
+//             content: IndexedFileContent::SmallFileContent(
+//                 content.as_bytes().to_owned().into_boxed_slice(),
+//             ),
+//             // stats: Default::default(),
+//         }
+//     }
+// }
 
-#[derive(Debug, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum IndexedFileContent {
-    SmallFileContent(Box<[u8]>),
-    ChunkedFile(FileHashChunks),
-}
+// #[derive(Debug, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+// pub enum IndexedFileContent {
+//     SmallFileContent(Box<[u8]>),
+//     ChunkedFile(HashChunks),
+// }
 
 #[derive(
     Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -45,37 +44,37 @@ impl From<PeerId> for IndexPeerId {
     }
 }
 
-type IndexMap = crdts::Map<FileFullPath, VIndexReg, IndexPeerId>;
-type IndexMapOp = <IndexMap as CmRDT>::Op;
+type IndexMap<IndexedObject> = crdts::Map<String, VIndexReg<IndexedObject>, IndexPeerId>;
+type IndexMapOp<IndexedObject> = <IndexMap<IndexedObject> as CmRDT>::Op;
 
-type VIndexOp = (Dot<IndexPeerId>, IndexMapOp);
+type VIndexOp<IndexedObject> = (Dot<IndexPeerId>, IndexMapOp<IndexedObject>);
 
 #[derive(Debug, Clone, Default)]
-pub struct VIndex {
-    map: IndexMap,
+pub struct VIndex<IndexedObject: Clone + Default + Debug + PartialEq> {
+    map: IndexMap<IndexedObject>,
     clock: VClock<IndexPeerId>,
-    ops: Vec<VIndexOp>,
+    ops: Vec<VIndexOp<IndexedObject>>,
 }
 
-impl VIndex {
+impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
     fn write(
         &self,
-        full_path: impl Into<FileFullPath>,
-        file: IndexedFile,
+        key: impl Into<String>,
+        object: IndexedObject,
         timestamp: u64,
         peer_id: IndexPeerId,
         add_ctx: AddCtx<IndexPeerId>,
-    ) -> VIndexOp {
+    ) -> VIndexOp<IndexedObject> {
         (
             add_ctx.dot.clone(),
-            self.map.update(full_path, add_ctx, |_, add_ctx| {
-                VIndexReg::new(file, add_ctx.clock, timestamp, peer_id)
+            self.map.update(key, add_ctx, |_, add_ctx| {
+                VIndexReg::new(object, add_ctx.clock, timestamp, peer_id)
             }),
         )
     }
 
-    fn read(&self, full_path: &FileFullPath) -> ReadCtx<Option<IndexedFile>, IndexPeerId> {
-        let read_ctx = self.map.get(full_path);
+    fn read(&self, key: impl Into<String>) -> ReadCtx<Option<IndexedObject>, IndexPeerId> {
+        let read_ctx = self.map.get(&key.into());
 
         if let Some(reg) = read_ctx.val {
             ReadCtx {
@@ -92,11 +91,11 @@ impl VIndex {
         }
     }
 
-    fn rm(&self, full_path: impl Into<FileFullPath>, add_ctx: AddCtx<IndexPeerId>) -> VIndexOp {
+    fn rm(&self, key: impl Into<String>, add_ctx: AddCtx<IndexPeerId>) -> VIndexOp<IndexedObject> {
         (
             add_ctx.dot.clone(),
             self.map.rm(
-                full_path,
+                key,
                 RmCtx {
                     clock: add_ctx.clock,
                 },
@@ -116,7 +115,7 @@ impl VIndex {
         self.map.read_ctx().add_clock
     }
 
-    fn ops_after(&self, after: &VClock<IndexPeerId>) -> Vec<VIndexOp> {
+    fn ops_after(&self, after: &VClock<IndexPeerId>) -> Vec<VIndexOp<IndexedObject>> {
         self.ops
             .iter()
             .filter(|(dot, _)| dot > &after.dot(dot.actor))
@@ -137,12 +136,22 @@ impl VIndex {
             other.apply(op);
         }
     }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, &IndexedObject)> {
+        self.map.iter().filter_map(|item_ctx| {
+            item_ctx
+                .val
+                .1
+                .val()
+                .map(|val| (item_ctx.val.0.as_str(), val))
+        })
+    }
 }
 
-impl CmRDT for VIndex {
-    type Op = VIndexOp;
+impl<IndexedObject: Clone + Default + Debug + PartialEq> CmRDT for VIndex<IndexedObject> {
+    type Op = VIndexOp<IndexedObject>;
 
-    type Validation = <IndexMap as CmRDT>::Validation;
+    type Validation = <IndexMap<IndexedObject> as CmRDT>::Validation;
 
     fn validate_op(&self, (_, map_op): &Self::Op) -> Result<(), Self::Validation> {
         self.map.validate_op(map_op)
@@ -158,58 +167,50 @@ impl CmRDT for VIndex {
 #[cfg(test)]
 mod tests {
     use crdts::CmRDT;
-    use file::FileFullPath;
     use libp2p::PeerId;
 
-    use crate::{IndexPeerId, IndexedFile, VIndex};
+    use crate::{IndexPeerId, VIndex};
 
     #[test]
     fn test_index() {
         let device_1_peer_id = IndexPeerId::from(PeerId::random());
         let device_2_peer_id = IndexPeerId::from(PeerId::random());
-        let file_path = FileFullPath::parse("/path/file");
         let mut device_1 = VIndex::default();
         device_1.apply(device_1.write(
-            file_path.clone(),
-            IndexedFile::quick_create_file(file_path.clone(), "test"),
+            "/path/file",
+            "test",
             1,
             device_1_peer_id,
             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
         ));
         let mut device_2 = device_1.clone();
         device_1.apply(device_1.write(
-            file_path.clone(),
-            IndexedFile::quick_create_file(file_path.clone(), "123"),
+            "/path/file",
+            "123",
             2,
             device_1_peer_id,
             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
         ));
         device_2.apply(device_2.write(
-            file_path.clone(),
-            IndexedFile::quick_create_file(file_path.clone(), "456"),
+            "/path/file",
+            "456",
             3,
             device_2_peer_id,
             device_2.read_ctx().derive_add_ctx(device_2_peer_id),
         ));
         device_1.quick_sync(&mut device_2);
 
-        assert_eq!(
-            device_1.read(&file_path).val.unwrap(),
-            IndexedFile::quick_create_file(file_path.clone(), "456")
-        );
-        assert_eq!(
-            device_2.read(&file_path).val.unwrap(),
-            IndexedFile::quick_create_file(file_path.clone(), "456")
-        );
+        assert_eq!(device_1.read("/path/file").val.unwrap(), "456");
+        assert_eq!(device_2.read("/path/file").val.unwrap(), "456");
 
         device_1.apply(device_1.rm(
-            file_path.clone(),
+            "/path/file",
             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
         ));
 
         device_2.apply(device_2.write(
-            file_path.clone(),
-            IndexedFile::quick_create_file(file_path.clone(), "789"),
+            "/path/file",
+            "789",
             3,
             device_2_peer_id,
             device_2.read_ctx().derive_add_ctx(device_2_peer_id),
@@ -217,23 +218,17 @@ mod tests {
 
         device_2.quick_sync(&mut device_1);
 
-        assert_eq!(
-            device_1.read(&file_path).val,
-            Some(IndexedFile::quick_create_file(file_path.clone(), "789"))
-        );
-        assert_eq!(
-            device_2.read(&file_path).val,
-            Some(IndexedFile::quick_create_file(file_path.clone(), "789"))
-        );
+        assert_eq!(device_1.read("/path/file").val, Some("789"));
+        assert_eq!(device_2.read("/path/file").val, Some("789"));
 
         device_1.apply(device_1.rm(
-            file_path.clone(),
+            "/path/file",
             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
         ));
 
         device_2.quick_sync(&mut device_1);
 
-        assert_eq!(device_1.read(&file_path).val, None);
-        assert_eq!(device_2.read(&file_path).val, None);
+        assert_eq!(device_1.read("/path/file").val, None);
+        assert_eq!(device_2.read("/path/file").val, None);
     }
 }

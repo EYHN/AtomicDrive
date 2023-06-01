@@ -1,11 +1,10 @@
 [package]
-name = "sync"
+name = "vindex"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 utils = { path = "../utils" }
-file = { path = "../file" }
 serde = { version = "1.0", features = ["derive"] }
 fastcdc = "3.0.3"
 crdts = "7.3.0"
