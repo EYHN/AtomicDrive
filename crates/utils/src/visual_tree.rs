@@ -12,7 +12,8 @@ pub fn visual_tree_from_entities<
     entities.sort_by_key(|v| v.0);
 
     // let mut stack = vec![];
-    for entity in entities {
+    for (i, entity) in entities.iter().enumerate() {
+        let next = entities.get(i + 1);
         let (path, content) = entity;
         let mut level = 0;
         let parts = path.split(pat).filter(|part| part.len() > 0);
@@ -24,7 +25,11 @@ pub fn visual_tree_from_entities<
                 for _ in 0..level {
                     tree.push_str("| ")
                 }
-                tree.push_str("├");
+                if next.is_some() {
+                    tree.push_str("├");
+                } else {
+                    tree.push_str("└");
+                }
                 tree.push_str(part);
                 tree.push_str("\n");
             }
