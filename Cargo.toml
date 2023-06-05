@@ -3,5 +3,7 @@ members = [
     "./crates/file",
     "./crates/file_local",
     "./crates/utils",
-    "./crates/vindex"
+    "./crates/vindex",
+    "./crates/sync",
+    "./crates/chunk"
 ]

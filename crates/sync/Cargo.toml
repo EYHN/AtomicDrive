@@ -1,0 +1,19 @@
+[package]
+name = "sync"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+utils = { path = "../utils" }
+file = { path = "../file" }
+file_local = { path = "../file_local" }
+vindex = { path = "../vindex" }
+chunk = { path = "../chunk" }
+libp2p = { version = "0.51.2" }
+crdts = "7.3.0"
+
+[profile.release]
+debug = 1
+
+[rust]
+debuginfo-level = 1

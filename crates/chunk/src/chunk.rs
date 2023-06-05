@@ -1,24 +1,30 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 use sha2::{Digest, Sha256};
 use utils::bytes_stringify;
 
-#[derive(Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HashChunks {
     chunks: Vec<HashChunk>,
     hash: [u8; 16],
 }
 
+impl Display for HashChunks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} chunks", self.chunks.len())
+    }
+}
+
 impl Debug for HashChunks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FileHashChunks")
+        f.debug_struct("HashChunks")
             .field("chunks", &self.chunks)
             .field("hash", &bytes_stringify(&self.hash))
             .finish()
     }
 }
 
-#[derive(Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HashChunk {
     size: u32,
     hash: [u8; 16],
@@ -33,7 +39,7 @@ impl Debug for HashChunk {
     }
 }
 
-fn chunks(data: &[u8]) -> HashChunks {
+pub fn chunks(data: &[u8]) -> HashChunks {
     let chunker = fastcdc::v2020::FastCDC::new(
         data, 65536,  /* 64 KiB */
         131072, /* 128 KiB */

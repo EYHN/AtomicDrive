@@ -167,26 +167,19 @@ impl From<LocalFileSystemTrackerEvent> for file::FileEvent {
 
 pub type LocalFileSystemTrackerEventPack = Vec<LocalFileSystemTrackerEvent>;
 
-pub type LocalFileSystemTrackerCallback =
-    Box<dyn Fn(LocalFileSystemTrackerEventPack) + Send + Sync + 'static>;
-
 pub struct LocalFileSystemTracker {
     db: TransactionDB,
-    callback: LocalFileSystemTrackerCallback,
 }
 
 impl LocalFileSystemTracker {
-    pub fn open_or_create_database(
-        path: impl AsRef<Path>,
-        cb: LocalFileSystemTrackerCallback,
-    ) -> Result<Self> {
+    pub fn open_or_create_database(path: impl AsRef<Path>) -> Result<Self> {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
         let mut t_opts = rocksdb::TransactionDBOptions::default();
         t_opts.set_default_lock_timeout(5000);
 
         let db = TransactionDB::open(&opts, &t_opts, path)?;
-        Ok(Self { db, callback: cb })
+        Ok(Self { db })
     }
 
     pub fn drop_database(path: impl AsRef<Path>) -> Result<()> {
@@ -195,7 +188,7 @@ impl LocalFileSystemTracker {
         Ok(())
     }
 
-    pub fn index(&self, input: IndexInput) -> Result<()> {
+    pub fn index(&self, input: IndexInput) -> Result<LocalFileSystemTrackerEventPack> {
         // prev_file: The file associated with the url before the operation
         // next_file: The file associated with the url after the operation
 
@@ -263,11 +256,10 @@ impl LocalFileSystemTracker {
 
         fn execute(
             operation: &Operation,
-            callback: &LocalFileSystemTrackerCallback,
             create: Vec<(FileFullPath, FileType, FileIdentifier, FileUpdateToken)>,
             update: Vec<(FileFullPath, FileType, FileIdentifier, FileUpdateToken)>,
             delete: Vec<(FileFullPath, FileType, FileIdentifier)>,
-        ) -> Result<()> {
+        ) -> Result<LocalFileSystemTrackerEventPack> {
             let fetch_size = update.len() + create.len() + delete.len();
             let mut file_handle_list = Vec::with_capacity(fetch_size);
             file_handle_list.extend(create.iter().map(|c| c.2.clone()));
@@ -339,9 +331,8 @@ impl LocalFileSystemTracker {
 
             delete_events.append(&mut create_events);
             delete_events.append(&mut update_events);
-            callback(delete_events);
 
-            Ok(())
+            Ok(delete_events)
         }
 
         let operation = Operation::new(self.db.transaction());
@@ -433,9 +424,9 @@ impl LocalFileSystemTracker {
             }
         }
 
-        execute(&operation, &self.callback, create, update, delete)?;
+        let event_pack = execute(&operation, create, update, delete)?;
         operation.commit()?;
-        Ok(())
+        Ok(event_pack)
     }
 
     pub fn dump(&self) -> Result<Vec<(Keys, Values)>> {

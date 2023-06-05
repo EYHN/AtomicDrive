@@ -57,7 +57,7 @@ pub struct VIndex<IndexedObject: Clone + Default + Debug + PartialEq> {
 }
 
 impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
-    fn write(
+    pub fn write(
         &self,
         key: impl Into<String>,
         object: IndexedObject,
@@ -73,7 +73,7 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
         )
     }
 
-    fn read(&self, key: impl Into<String>) -> ReadCtx<Option<IndexedObject>, IndexPeerId> {
+    pub fn read(&self, key: impl Into<String>) -> ReadCtx<Option<IndexedObject>, IndexPeerId> {
         let read_ctx = self.map.get(&key.into());
 
         if let Some(reg) = read_ctx.val {
@@ -91,7 +91,7 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
         }
     }
 
-    fn rm(&self, key: impl Into<String>, add_ctx: AddCtx<IndexPeerId>) -> VIndexOp<IndexedObject> {
+    pub fn rm(&self, key: impl Into<String>, add_ctx: AddCtx<IndexPeerId>) -> VIndexOp<IndexedObject> {
         (
             add_ctx.dot.clone(),
             self.map.rm(
@@ -103,7 +103,7 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
         )
     }
 
-    fn read_ctx(&self) -> ReadCtx<(), IndexPeerId> {
+    pub fn read_ctx(&self) -> ReadCtx<(), IndexPeerId> {
         ReadCtx {
             add_clock: self.clock.clone(),
             rm_clock: self.clock.clone(),
@@ -111,11 +111,11 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
         }
     }
 
-    fn clock(&self) -> VClock<IndexPeerId> {
+    pub fn clock(&self) -> VClock<IndexPeerId> {
         self.map.read_ctx().add_clock
     }
 
-    fn ops_after(&self, after: &VClock<IndexPeerId>) -> Vec<VIndexOp<IndexedObject>> {
+    pub fn ops_after(&self, after: &VClock<IndexPeerId>) -> Vec<VIndexOp<IndexedObject>> {
         self.ops
             .iter()
             .filter(|(dot, _)| dot > &after.dot(dot.actor))
@@ -123,7 +123,7 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
             .collect()
     }
 
-    fn quick_sync(&mut self, other: &mut Self) {
+    pub fn quick_sync(&mut self, other: &mut Self) {
         let other_ops = other.ops_after(&self.clock());
 
         for op in other_ops {
@@ -137,7 +137,7 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
         }
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&str, &IndexedObject)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &IndexedObject)> {
         self.map.iter().filter_map(|item_ctx| {
             item_ctx
                 .val

@@ -1,11 +1,10 @@
 use std::{
     collections::hash_map::DefaultHasher,
-    fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::Arc, os::unix::prelude::MetadataExt,
 };
 
-use file::{FileEventCallback, FileFullPath};
+use file::{FileEvent, FileFullPath, FileStats};
 use parking_lot::Mutex;
 use utils::PathTools;
 
@@ -53,23 +52,20 @@ fn convert_vpath_to_fspath(fs_root: &Path, path: FileFullPath) -> PathBuf {
 }
 
 #[derive(Debug, Clone)]
-struct LocalFileSystemConfiguration {
-    root: PathBuf,
-    data_dir: PathBuf,
+pub struct LocalFileSystemConfiguration {
+    pub root: PathBuf,
+    pub data_dir: PathBuf,
 }
 
-struct LocalFileSystem {
+pub struct LocalFileSystem {
     configuration: LocalFileSystemConfiguration,
     tracker: Arc<Mutex<tracker::LocalFileSystemTracker>>,
-    watcher: Mutex<watcher::LocalFileSystemWatcher>,
+    // watcher: Mutex<watcher::LocalFileSystemWatcher>,
     walker: Mutex<walker::LocalFileSystemWalker>,
 }
 
 impl LocalFileSystem {
-    pub fn new(
-        event_callback: FileEventCallback,
-        configuration: LocalFileSystemConfiguration,
-    ) -> Self {
+    pub fn new(configuration: LocalFileSystemConfiguration) -> Self {
         let walker = Mutex::new(walker::LocalFileSystemWalker::new(
             configuration.root.clone(),
         ));
@@ -77,9 +73,6 @@ impl LocalFileSystem {
         let tracker = Arc::new(Mutex::new(
             tracker::LocalFileSystemTracker::open_or_create_database(
                 configuration.data_dir.join("db"),
-                Box::new(move |events| {
-                    event_callback(events.into_iter().map(|e| e.into()).collect())
-                }),
             )
             .unwrap(),
         ));
@@ -87,103 +80,120 @@ impl LocalFileSystem {
         let tracker_for_watcher = tracker.clone();
         let cfg_for_watcher = configuration.clone();
 
-        let watcher = Mutex::new(watcher::LocalFileSystemWatcher::new(
-            configuration.root.clone(),
-            Box::new(move |paths| {
-                let tracker = tracker_for_watcher.lock();
+        // let watcher = Mutex::new(watcher::LocalFileSystemWatcher::new(
+        //     configuration.root.clone(),
+        //     Box::new(move |paths| {
+        //         let tracker = tracker_for_watcher.lock();
 
-                for path in paths.into_iter() {
-                    let vpath =
-                        convert_fspath_to_vpath(&cfg_for_watcher.root, &path);
-                    if let Some(vpath) = vpath {
-                        match fs::metadata(path) {
-                            Ok(metadata) => {
-                                tracker
-                                    .index(tracker::IndexInput::File(
-                                        vpath.clone(),
-                                        metadata.file_type().into(),
-                                        calc_file_identifier(&vpath, &metadata),
-                                        calc_file_update_token(&metadata),
-                                    ))
-                                    .unwrap();
-                            }
-                            Err(err) => {
-                                if err.kind() == std::io::ErrorKind::NotFound {
-                                    tracker
-                                        .index(tracker::IndexInput::Empty(vpath))
-                                        .unwrap()
-                                } else {
-                                    todo!()
-                                }
-                            }
-                        }
-                    }
-                }
-            }),
-        ));
+        //         for path in paths.into_iter() {
+        //             let vpath = convert_fspath_to_vpath(&cfg_for_watcher.root, &path);
+        //             if let Some(vpath) = vpath {
+        //                 match fs::metadata(path) {
+        //                     Ok(metadata) => {
+        //                         tracker
+        //                             .index(tracker::IndexInput::File(
+        //                                 vpath.clone(),
+        //                                 metadata.file_type().into(),
+        //                                 calc_file_identifier(&vpath, &metadata),
+        //                                 calc_file_update_token(&metadata),
+        //                             ))
+        //                             .unwrap();
+        //                     }
+        //                     Err(err) => {
+        //                         if err.kind() == std::io::ErrorKind::NotFound {
+        //                             tracker.index(tracker::IndexInput::Empty(vpath)).unwrap()
+        //                         } else {
+        //                             todo!()
+        //                         }
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //     }),
+        // ));
 
         Self {
             configuration,
             tracker,
             walker,
-            watcher,
+            // watcher,
         }
     }
 
-    fn watch(&self) {
-        let mut watcher = self.watcher.lock();
-        watcher.watch();
+    // fn watch(&self) {
+    //     let mut watcher = self.watcher.lock();
+    //     watcher.watch();
+    // }
+
+    // fn unwatch(&self) {
+    //     let mut watcher = self.watcher.lock();
+    //     watcher.unwatch();
+    // }
+
+    pub fn read_file(&self, path: FileFullPath) -> Vec<u8> {
+        std::fs::read(convert_vpath_to_fspath(&self.configuration.root, path)).unwrap()
     }
 
-    fn unwatch(&self) {
-        let mut watcher = self.watcher.lock();
-        watcher.unwatch();
+    pub fn stat_file(&self, path: FileFullPath) -> FileStats {
+        let metadata =
+            std::fs::metadata(convert_vpath_to_fspath(&self.configuration.root, path)).unwrap();
+        FileStats {
+            creation_time: 0,
+            last_write_time: 0,
+            size: metadata.size(),
+            file_type: metadata.file_type().into(),
+        }
     }
 
-    pub fn walk(&self) {
+    pub fn quick_full_walk(&self) -> Vec<FileEvent> {
         let tracker = self.tracker.lock();
         let mut walker = self.walker.lock();
+        let mut events: Vec<FileEvent> = vec![];
         walker.start_new_walking();
         for item in walker.iter() {
             if let Ok(item) = item {
-                let item_path =
-                    convert_fspath_to_vpath(&self.configuration.root, &item.path);
+                let item_path = convert_fspath_to_vpath(&self.configuration.root, &item.path);
                 if let Some(item_path) = item_path {
-                    tracker
-                        .index(tracker::IndexInput::Directory(
-                            item_path.clone(),
-                            calc_file_identifier(&item_path, &item.metadata),
-                            calc_file_update_token(&item.metadata),
-                            item.children
-                                .into_iter()
-                                .filter_map(|(filename, metadata)| {
-                                    let filename = filename.to_string_lossy();
-                                    if filename
-                                        .chars()
-                                        .any(|c| c == std::char::REPLACEMENT_CHARACTER)
-                                    {
-                                        None
-                                    } else {
-                                        Some((filename.to_string(), metadata))
-                                    }
-                                })
-                                .map(|(file_name, metadata)| {
-                                    (
-                                        file_name.clone(),
-                                        metadata.file_type().into(),
-                                        calc_file_identifier(
-                                            &item_path.join(&file_name),
-                                            &metadata,
-                                        ),
-                                        calc_file_update_token(&metadata),
-                                    )
-                                })
-                                .collect(),
-                        ))
-                        .unwrap();
+                    events.extend(
+                        tracker
+                            .index(tracker::IndexInput::Directory(
+                                item_path.clone(),
+                                calc_file_identifier(&item_path, &item.metadata),
+                                calc_file_update_token(&item.metadata),
+                                item.children
+                                    .into_iter()
+                                    .filter_map(|(filename, metadata)| {
+                                        let filename = filename.to_string_lossy();
+                                        if filename
+                                            .chars()
+                                            .any(|c| c == std::char::REPLACEMENT_CHARACTER)
+                                        {
+                                            None
+                                        } else {
+                                            Some((filename.to_string(), metadata))
+                                        }
+                                    })
+                                    .map(|(file_name, metadata)| {
+                                        (
+                                            file_name.clone(),
+                                            metadata.file_type().into(),
+                                            calc_file_identifier(
+                                                &item_path.join(&file_name),
+                                                &metadata,
+                                            ),
+                                            calc_file_update_token(&metadata),
+                                        )
+                                    })
+                                    .collect(),
+                            ))
+                            .unwrap()
+                            .into_iter()
+                            .map(|e| e.into()),
+                    );
                 }
             }
         }
+        events
     }
 }
 
@@ -195,16 +205,11 @@ mod tests {
 
     #[test]
     fn test() {
-        let fs = LocalFileSystem::new(
-            Box::new(|ev| {
-                dbg!(ev);
-            }),
-            crate::LocalFileSystemConfiguration {
-                root: PathBuf::from("/Users/admin/Projects/AtomicDrive/test_dir"),
-                data_dir: PathBuf::from("/Users/admin/Projects/AtomicDrive/cache"),
-            },
-        );
+        let fs = LocalFileSystem::new(crate::LocalFileSystemConfiguration {
+            root: PathBuf::from("/Users/admin/Projects/AtomicDrive/test_dir"),
+            data_dir: PathBuf::from("/Users/admin/Projects/AtomicDrive/cache"),
+        });
 
-        fs.walk();
+        dbg!(fs.quick_full_walk());
     }
 }

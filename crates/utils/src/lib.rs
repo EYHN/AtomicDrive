@@ -1,7 +1,7 @@
 mod bytes_stringify;
 mod path;
-mod visual_tree;
+mod tree_stringify;
 
 pub use bytes_stringify::*;
 pub use path::*;
-pub use visual_tree::*;
+pub use tree_stringify::*;
