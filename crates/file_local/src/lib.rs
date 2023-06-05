@@ -1,7 +1,8 @@
 use std::{
     collections::hash_map::DefaultHasher,
+    os::unix::prelude::MetadataExt,
     path::{Path, PathBuf},
-    sync::Arc, os::unix::prelude::MetadataExt,
+    sync::Arc,
 };
 
 use file::{FileEvent, FileFullPath, FileStats};
@@ -80,8 +81,17 @@ impl LocalFileSystem {
         let tracker_for_watcher = tracker.clone();
         let cfg_for_watcher = configuration.clone();
 
+        Self {
+            configuration,
+            tracker,
+            walker,
+            // watcher,
+        }
+    }
+
+    fn watch(&self) {
         // let watcher = Mutex::new(watcher::LocalFileSystemWatcher::new(
-        //     configuration.root.clone(),
+        //     self.configuration.root.clone(),
         //     Box::new(move |paths| {
         //         let tracker = tracker_for_watcher.lock();
 
@@ -111,19 +121,8 @@ impl LocalFileSystem {
         //         }
         //     }),
         // ));
-
-        Self {
-            configuration,
-            tracker,
-            walker,
-            // watcher,
-        }
+        // watcher.watch();
     }
-
-    // fn watch(&self) {
-    //     let mut watcher = self.watcher.lock();
-    //     watcher.watch();
-    // }
 
     // fn unwatch(&self) {
     //     let mut watcher = self.watcher.lock();

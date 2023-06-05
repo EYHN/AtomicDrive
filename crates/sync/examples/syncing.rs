@@ -16,8 +16,8 @@ pub struct SyncingApp {
 impl SyncingApp {
     pub fn new() -> Self {
         let fs = LocalFileSystem::new(LocalFileSystemConfiguration {
-            root: PathBuf::from("/Users/admin/Projects/AtomicDrive/test_dir"),
-            data_dir: PathBuf::from("/Users/admin/Projects/AtomicDrive/cache"),
+            root: PathBuf::from("/Users/eyhn/Projects/AtomicDrive/test_dir"),
+            data_dir: PathBuf::from("/Users/eyhn/Projects/AtomicDrive/cache"),
         });
 
         let device_peer_id = IndexPeerId::from(PeerId::random());
@@ -26,7 +26,7 @@ impl SyncingApp {
 
         for event in fs.quick_full_walk() {
             match event.event_type {
-                file::FileEventType::Created => {
+                file::FileEventType::Created | file::FileEventType::Changed => {
                     let stat = fs.stat_file(event.path.clone());
                     if stat.file_type == FileType::File {
                         let data = fs.read_file(event.path.clone());
@@ -39,8 +39,10 @@ impl SyncingApp {
                         ))
                     }
                 }
-                file::FileEventType::Deleted => todo!(),
-                file::FileEventType::Changed => todo!(),
+                file::FileEventType::Deleted => device.apply(device.rm(
+                    event.path.to_string(),
+                    device.read_ctx().derive_add_ctx(device_peer_id),
+                )),
             }
         }
 
@@ -65,13 +67,28 @@ impl eframe::App for SyncingApp {
 }
 
 fn main() -> eframe::Result<()> {
-    // Log to stdout (if you run with `RUST_LOG=debug`).
     tracing_subscriber::fmt::init();
 
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "Atomic Drive",
         native_options,
-        Box::new(|cc| Box::new(SyncingApp::new())),
+        Box::new(|cc| {
+            let mut fonts = egui::FontDefinitions::default();
+
+            fonts.font_data.insert(
+                "FiraCode".to_owned(),
+                egui::FontData::from_static(include_bytes!("FiraCode-Regular.ttf")),
+            );
+
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "FiraCode".to_owned());
+
+            cc.egui_ctx.set_fonts(fonts);
+            Box::new(SyncingApp::new())
+        }),
     )
 }
