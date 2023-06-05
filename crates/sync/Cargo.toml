@@ -17,3 +17,8 @@ debug = 1
 
 [rust]
 debuginfo-level = 1
+
+[dev-dependencies]
+egui = "0.21.0"
+eframe = { version = "0.21.0", default-features = false, features = ["default_fonts", "glow"] }
+tracing-subscriber = "0.3"

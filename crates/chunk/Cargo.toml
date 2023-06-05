@@ -6,5 +6,6 @@ edition = "2021"
 [dependencies]
 utils = { path = "../utils" }
 serde = { version = "1.0", features = ["derive"] }
+xxhash-rust = { version = "0.8.6", features = ["xxh3"] }
 fastcdc = "3.0.3"
 sha2 = "0.10.6"

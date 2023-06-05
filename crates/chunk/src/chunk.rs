@@ -2,6 +2,7 @@ use std::fmt::{Debug, Display};
 
 use sha2::{Digest, Sha256};
 use utils::bytes_stringify;
+use xxhash_rust::xxh3::xxh3_128;
 
 #[derive(Default, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HashChunks {
@@ -53,19 +54,17 @@ pub fn chunks(data: &[u8]) -> HashChunks {
     for chunk in chunker {
         chunks.push(HashChunk {
             size: chunk.length.try_into().unwrap(),
-            hash: Sha256::digest(&data[chunk.offset..chunk.offset + chunk.length])[0..16]
-                .try_into()
-                .unwrap(),
+            hash: xxh3_128(&data[chunk.offset..chunk.offset + chunk.length]).to_be_bytes(),
         })
     }
 
     HashChunks {
         hash: {
-            let mut fileHash = Sha256::new();
+            let mut hashs = vec![];
             for chunk in chunks.iter() {
-                fileHash.update(&chunk.hash)
+                hashs.extend(&chunk.hash)
             }
-            fileHash.finalize()[0..16].try_into().unwrap()
+            xxh3_128(&hashs).to_be_bytes()
         },
         chunks,
     }
