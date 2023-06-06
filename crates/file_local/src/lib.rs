@@ -5,13 +5,13 @@ use std::{
     sync::Arc,
 };
 
-use file::{FileEvent, FileFullPath, FileStats};
+use file::{FileEvent, FileEventCallback, FileFullPath, FileStats};
 use parking_lot::Mutex;
 use utils::PathTools;
 
 mod tracker;
 mod walker;
-mod watcher;
+pub mod watcher;
 
 fn calc_file_identifier(vpath: &FileFullPath, metadata: &std::fs::Metadata) -> Vec<u8> {
     let mut hasher: DefaultHasher = DefaultHasher::new();
@@ -78,56 +78,59 @@ impl LocalFileSystem {
             .unwrap(),
         ));
 
-        let tracker_for_watcher = tracker.clone();
-        let cfg_for_watcher = configuration.clone();
-
         Self {
             configuration,
             tracker,
             walker,
-            // watcher,
         }
     }
 
-    fn watch(&self) {
-        // let watcher = Mutex::new(watcher::LocalFileSystemWatcher::new(
-        //     self.configuration.root.clone(),
-        //     Box::new(move |paths| {
-        //         let tracker = tracker_for_watcher.lock();
+    pub fn watch(&self, cb: FileEventCallback) -> watcher::LocalFileSystemWatcher {
+        let tracker_for_watcher = self.tracker.clone();
+        let cfg_for_watcher = self.configuration.clone();
 
-        //         for path in paths.into_iter() {
-        //             let vpath = convert_fspath_to_vpath(&cfg_for_watcher.root, &path);
-        //             if let Some(vpath) = vpath {
-        //                 match fs::metadata(path) {
-        //                     Ok(metadata) => {
-        //                         tracker
-        //                             .index(tracker::IndexInput::File(
-        //                                 vpath.clone(),
-        //                                 metadata.file_type().into(),
-        //                                 calc_file_identifier(&vpath, &metadata),
-        //                                 calc_file_update_token(&metadata),
-        //                             ))
-        //                             .unwrap();
-        //                     }
-        //                     Err(err) => {
-        //                         if err.kind() == std::io::ErrorKind::NotFound {
-        //                             tracker.index(tracker::IndexInput::Empty(vpath)).unwrap()
-        //                         } else {
-        //                             todo!()
-        //                         }
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //     }),
-        // ));
-        // watcher.watch();
+        let mut watcher = watcher::LocalFileSystemWatcher::new(
+            self.configuration.root.clone(),
+            Box::new(move |paths| {
+                let tracker = tracker_for_watcher.lock();
+
+                for path in paths.into_iter() {
+                    let vpath = convert_fspath_to_vpath(&cfg_for_watcher.root, &path);
+                    if let Some(vpath) = vpath {
+                        match std::fs::metadata(path) {
+                            Ok(metadata) => {
+                                cb(tracker
+                                    .index(tracker::IndexInput::File(
+                                        vpath.clone(),
+                                        metadata.file_type().into(),
+                                        calc_file_identifier(&vpath, &metadata),
+                                        calc_file_update_token(&metadata),
+                                    ))
+                                    .unwrap()
+                                    .into_iter()
+                                    .map(|e| e.into())
+                                    .collect());
+                            }
+                            Err(err) => {
+                                if err.kind() == std::io::ErrorKind::NotFound {
+                                    cb(tracker
+                                        .index(tracker::IndexInput::Empty(vpath))
+                                        .unwrap()
+                                        .into_iter()
+                                        .map(|e| e.into())
+                                        .collect())
+                                } else {
+                                    todo!()
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+        watcher.watch().unwrap();
+        watcher
     }
-
-    // fn unwatch(&self) {
-    //     let mut watcher = self.watcher.lock();
-    //     watcher.unwatch();
-    // }
 
     pub fn read_file(&self, path: FileFullPath) -> Vec<u8> {
         std::fs::read(convert_vpath_to_fspath(&self.configuration.root, path)).unwrap()

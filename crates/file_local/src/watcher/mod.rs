@@ -25,7 +25,7 @@ impl LocalFileSystemWatcher {
     }
 
     pub fn watch(&mut self) -> Result<()> {
-        self.unwatch();
+        self.unwatch()?;
         let cb = self.cb.clone();
         let mut watcher = Box::new(notify::recommended_watcher(
             move |res: notify::Result<notify::Event>| match res {
