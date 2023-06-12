@@ -46,8 +46,8 @@ pub fn chunks(data: &[u8]) -> HashChunks {
         131072, /* 128 KiB */
         262144, /* 256 KiB */
     );
-    let mut chunks = if let Some(maxSize) = chunker.size_hint().1 {
-        Vec::with_capacity(maxSize)
+    let mut chunks = if let Some(max_size) = chunker.size_hint().1 {
+        Vec::with_capacity(max_size)
     } else {
         Vec::new()
     };

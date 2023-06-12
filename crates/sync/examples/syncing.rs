@@ -8,7 +8,7 @@ use crdts::CmRDT;
 use file::{FileEvent, FileType};
 use file_local::{watcher::LocalFileSystemWatcher, LocalFileSystem, LocalFileSystemConfiguration};
 use libp2p::PeerId;
-use utils::tree_stringify;
+use utils::{tree_stringify, workspace};
 use vindex::{IndexPeerId, VIndex};
 
 pub struct SyncingApp {
@@ -27,7 +27,7 @@ fn apply_file_event(
         file::FileEventType::Created | file::FileEventType::Changed => {
             let stat = fs.stat_file(file_event.path.clone());
             if stat.file_type == FileType::File {
-                let data = fs.read_file(file_event.path.clone());
+                let data = unsafe { fs.map_file(file_event.path.clone()) };
                 device.apply(device.write(
                     file_event.path.to_string(),
                     chunks(&data),
@@ -47,8 +47,8 @@ fn apply_file_event(
 impl SyncingApp {
     pub fn new() -> Self {
         let fs = Arc::new(LocalFileSystem::new(LocalFileSystemConfiguration {
-            root: PathBuf::from("/Users/admin/Projects/AtomicDrive/test_dir"),
-            data_dir: PathBuf::from("/Users/admin/Projects/AtomicDrive/cache"),
+            root: PathBuf::from(workspace!("test_dir")),
+            data_dir: PathBuf::from(workspace!("cache")),
         }));
 
         let device_peer_id = IndexPeerId::from(PeerId::random());

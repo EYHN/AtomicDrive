@@ -6,6 +6,7 @@ use std::{
 };
 
 use file::{FileEvent, FileEventCallback, FileFullPath, FileStats};
+use memmap2::Mmap;
 use parking_lot::Mutex;
 use utils::PathTools;
 
@@ -134,6 +135,13 @@ impl LocalFileSystem {
 
     pub fn read_file(&self, path: FileFullPath) -> Vec<u8> {
         std::fs::read(convert_vpath_to_fspath(&self.configuration.root, path)).unwrap()
+    }
+
+    pub unsafe fn map_file(&self, path: FileFullPath) -> Mmap {
+        let file =
+            std::fs::File::open(convert_vpath_to_fspath(&self.configuration.root, path)).unwrap();
+
+        Mmap::map(&file).unwrap()
     }
 
     pub fn stat_file(&self, path: FileFullPath) -> FileStats {

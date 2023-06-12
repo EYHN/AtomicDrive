@@ -8,29 +8,6 @@ use libp2p::PeerId;
 
 use crate::VIndexReg;
 
-// #[derive(Debug, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
-// pub struct IndexedObject {
-//     pub content: IndexedFileContent,
-//     // pub stats: FileStats,
-// }
-
-// impl IndexedObject {
-//     fn quick_create_file(content: &str) -> Self {
-//         IndexedObject {
-//             content: IndexedFileContent::SmallFileContent(
-//                 content.as_bytes().to_owned().into_boxed_slice(),
-//             ),
-//             // stats: Default::default(),
-//         }
-//     }
-// }
-
-// #[derive(Debug, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
-// pub enum IndexedFileContent {
-//     SmallFileContent(Box<[u8]>),
-//     ChunkedFile(HashChunks),
-// }
-
 #[derive(
     Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
