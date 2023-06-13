@@ -44,6 +44,12 @@ impl From<FileFullPath> for String {
     }
 }
 
+impl AsRef<str> for FileFullPath {
+    fn as_ref(&self) -> &str {
+        &self.value
+    }
+}
+
 impl Display for FileFullPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.value)

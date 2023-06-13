@@ -11,7 +11,7 @@ pub type Result<T> = std::result::Result<T, error::Error>;
 
 pub struct LocalFileSystemWatcher {
     base_path: PathBuf,
-    watcher: Option<Box<dyn notify::Watcher>>,
+    watcher: Option<Box<dyn notify::Watcher + Sync + Send>>,
     cb: Arc<dyn Fn(Vec<PathBuf>) + Send + Sync + 'static>,
 }
 

@@ -405,6 +405,8 @@ impl PathTools {
 
         res
     }
+
+    // fn dive
 }
 
 #[cfg(test)]

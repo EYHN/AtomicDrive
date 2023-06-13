@@ -53,6 +53,60 @@ fn convert_vpath_to_fspath(fs_root: &Path, path: FileFullPath) -> PathBuf {
     fs_root.join(PathBuf::from(format!(".{}", path)))
 }
 
+fn walk(
+    tracker: &mut tracker::LocalFileSystemTracker,
+    path: impl AsRef<Path>,
+    configuration: &LocalFileSystemConfiguration,
+) -> Vec<FileEvent> {
+    let mut walker = walker::LocalFileSystemWalker::new(path);
+    let mut events: Vec<FileEvent> = vec![];
+    walker.start_new_walking();
+    for item in walker.iter() {
+        if let Ok(item) = item {
+            let item_path = convert_fspath_to_vpath(&configuration.root, &item.path);
+            if let Some(item_path) = item_path {
+                events.extend(
+                    tracker
+                        .index(tracker::IndexInput::Directory(
+                            item_path.clone(),
+                            calc_file_identifier(&item_path, &item.metadata),
+                            calc_file_update_token(&item.metadata),
+                            item.children
+                                .into_iter()
+                                .filter_map(|(filename, metadata)| {
+                                    let filename = filename.to_string_lossy();
+                                    if filename
+                                        .chars()
+                                        .any(|c| c == std::char::REPLACEMENT_CHARACTER)
+                                    {
+                                        None
+                                    } else {
+                                        Some((filename.to_string(), metadata))
+                                    }
+                                })
+                                .map(|(file_name, metadata)| {
+                                    (
+                                        file_name.clone(),
+                                        metadata.file_type().into(),
+                                        calc_file_identifier(
+                                            &item_path.join(&file_name),
+                                            &metadata,
+                                        ),
+                                        calc_file_update_token(&metadata),
+                                    )
+                                })
+                                .collect(),
+                        ))
+                        .unwrap()
+                        .into_iter()
+                        .map(|e| e.into()),
+                );
+            }
+        }
+    }
+    events
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalFileSystemConfiguration {
     pub root: PathBuf,
@@ -62,16 +116,10 @@ pub struct LocalFileSystemConfiguration {
 pub struct LocalFileSystem {
     configuration: LocalFileSystemConfiguration,
     tracker: Arc<Mutex<tracker::LocalFileSystemTracker>>,
-    // watcher: Mutex<watcher::LocalFileSystemWatcher>,
-    walker: Mutex<walker::LocalFileSystemWalker>,
 }
 
 impl LocalFileSystem {
     pub fn new(configuration: LocalFileSystemConfiguration) -> Self {
-        let walker = Mutex::new(walker::LocalFileSystemWalker::new(
-            configuration.root.clone(),
-        ));
-
         let tracker = Arc::new(Mutex::new(
             tracker::LocalFileSystemTracker::open_or_create_database(
                 configuration.data_dir.join("db"),
@@ -82,7 +130,6 @@ impl LocalFileSystem {
         Self {
             configuration,
             tracker,
-            walker,
         }
     }
 
@@ -93,14 +140,14 @@ impl LocalFileSystem {
         let mut watcher = watcher::LocalFileSystemWatcher::new(
             self.configuration.root.clone(),
             Box::new(move |paths| {
-                let tracker = tracker_for_watcher.lock();
+                let mut tracker = tracker_for_watcher.lock();
 
                 for path in paths.into_iter() {
                     let vpath = convert_fspath_to_vpath(&cfg_for_watcher.root, &path);
                     if let Some(vpath) = vpath {
-                        match std::fs::metadata(path) {
+                        match std::fs::metadata(&path) {
                             Ok(metadata) => {
-                                cb(tracker
+                                let mut events: Vec<_> = tracker
                                     .index(tracker::IndexInput::File(
                                         vpath.clone(),
                                         metadata.file_type().into(),
@@ -110,7 +157,11 @@ impl LocalFileSystem {
                                     .unwrap()
                                     .into_iter()
                                     .map(|e| e.into())
-                                    .collect());
+                                    .collect();
+                                if metadata.file_type().is_dir() {
+                                    events.extend(walk(&mut tracker, &path, &cfg_for_watcher));
+                                }
+                                cb(events);
                             }
                             Err(err) => {
                                 if err.kind() == std::io::ErrorKind::NotFound {
@@ -156,54 +207,43 @@ impl LocalFileSystem {
     }
 
     pub fn quick_full_walk(&self) -> Vec<FileEvent> {
+        walk(
+            &mut self.tracker.lock(),
+            &self.configuration.root,
+            &self.configuration,
+        )
+    }
+
+    fn write_file(&self, path: FileFullPath, stat: FileStats, content: &[u8]) {
         let tracker = self.tracker.lock();
-        let mut walker = self.walker.lock();
-        let mut events: Vec<FileEvent> = vec![];
-        walker.start_new_walking();
-        for item in walker.iter() {
-            if let Ok(item) = item {
-                let item_path = convert_fspath_to_vpath(&self.configuration.root, &item.path);
-                if let Some(item_path) = item_path {
-                    events.extend(
-                        tracker
-                            .index(tracker::IndexInput::Directory(
-                                item_path.clone(),
-                                calc_file_identifier(&item_path, &item.metadata),
-                                calc_file_update_token(&item.metadata),
-                                item.children
-                                    .into_iter()
-                                    .filter_map(|(filename, metadata)| {
-                                        let filename = filename.to_string_lossy();
-                                        if filename
-                                            .chars()
-                                            .any(|c| c == std::char::REPLACEMENT_CHARACTER)
-                                        {
-                                            None
-                                        } else {
-                                            Some((filename.to_string(), metadata))
-                                        }
-                                    })
-                                    .map(|(file_name, metadata)| {
-                                        (
-                                            file_name.clone(),
-                                            metadata.file_type().into(),
-                                            calc_file_identifier(
-                                                &item_path.join(&file_name),
-                                                &metadata,
-                                            ),
-                                            calc_file_update_token(&metadata),
-                                        )
-                                    })
-                                    .collect(),
-                            ))
-                            .unwrap()
-                            .into_iter()
-                            .map(|e| e.into()),
-                    );
+
+        if PathTools::dirname(path.as_ref()) != "/" {
+            let dir_metadata = std::fs::metadata(convert_vpath_to_fspath(
+                &self.configuration.root,
+                FileFullPath::parse(PathTools::dirname(path.as_ref())),
+            ));
+
+            match dir_metadata {
+                Ok(metadata) => {
+                    if !metadata.is_dir() {
+                        todo!()
+                    }
+                }
+                Err(err) => {
+                    if err.kind() == std::io::ErrorKind::NotFound {
+                        
+                    } else {
+                        panic!("{:?}", err)
+                    }
                 }
             }
         }
-        events
+
+        // for  in PathTools::dirname(path)
+        // .to_owned()
+        // .split(PathTools::DIRECTORY_SEPARATOR_CHAR) {
+
+        // }
     }
 }
 

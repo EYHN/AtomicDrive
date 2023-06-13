@@ -10,7 +10,9 @@ file_local = { path = "../file_local" }
 vindex = { path = "../vindex" }
 chunk = { path = "../chunk" }
 libp2p = { version = "0.51.2" }
+parking_lot = "0.12.1"
 crdts = "7.3.0"
+egui = "0.21.0"
 
 [profile.release]
 debug = 1
@@ -19,6 +21,5 @@ debug = 1
 debuginfo-level = 1
 
 [dev-dependencies]
-egui = "0.21.0"
 eframe = { version = "0.21.0", default-features = false, features = ["default_fonts", "glow"] }
 tracing-subscriber = "0.3"

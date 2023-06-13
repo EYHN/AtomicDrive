@@ -1,98 +1,78 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
+    thread::{self, JoinHandle, Thread},
+    time::Duration,
 };
 
-use chunk::{chunks, HashChunks};
+use chunk::HashChunks;
 use crdts::CmRDT;
-use file::{FileEvent, FileType};
-use file_local::{watcher::LocalFileSystemWatcher, LocalFileSystem, LocalFileSystemConfiguration};
 use libp2p::PeerId;
+use parking_lot::Mutex;
+use sync::SyncingDrive;
 use utils::{tree_stringify, workspace};
-use vindex::{IndexPeerId, VIndex};
+use vindex::VIndex;
 
 pub struct SyncingApp {
-    file_system: Arc<LocalFileSystem>,
-    device: Arc<Mutex<VIndex<HashChunks>>>,
-    watcher: LocalFileSystemWatcher,
-}
-
-fn apply_file_event(
-    file_event: FileEvent,
-    fs: Arc<LocalFileSystem>,
-    device: &mut VIndex<HashChunks>,
-    device_peer_id: IndexPeerId,
-) {
-    match file_event.event_type {
-        file::FileEventType::Created | file::FileEventType::Changed => {
-            let stat = fs.stat_file(file_event.path.clone());
-            if stat.file_type == FileType::File {
-                let data = unsafe { fs.map_file(file_event.path.clone()) };
-                device.apply(device.write(
-                    file_event.path.to_string(),
-                    chunks(&data),
-                    stat.last_write_time,
-                    device_peer_id,
-                    device.read_ctx().derive_add_ctx(device_peer_id),
-                ))
-            }
-        }
-        file::FileEventType::Deleted => device.apply(device.rm(
-            file_event.path.to_string(),
-            device.read_ctx().derive_add_ctx(device_peer_id),
-        )),
-    }
+    drive: Arc<SyncingDrive>,
+    drive2: Arc<SyncingDrive>,
+    vindex: Arc<Mutex<VIndex<HashChunks>>>,
+    thread: JoinHandle<()>,
 }
 
 impl SyncingApp {
     pub fn new() -> Self {
-        let fs = Arc::new(LocalFileSystem::new(LocalFileSystemConfiguration {
-            root: PathBuf::from(workspace!("test_dir")),
-            data_dir: PathBuf::from(workspace!("cache")),
-        }));
+        let drive = Arc::new(SyncingDrive::new(
+            PathBuf::from(workspace!("test_dir")),
+            PathBuf::from(workspace!("cache")),
+            PeerId::random(),
+        ));
 
-        let device_peer_id = IndexPeerId::from(PeerId::random());
+        let drive2 = Arc::new(SyncingDrive::new(
+            PathBuf::from(workspace!("test_dir2")),
+            PathBuf::from(workspace!("cache2")),
+            PeerId::random(),
+        ));
 
-        let device = Arc::new(Mutex::new(VIndex::default()));
+        let vindex = Arc::new(Mutex::new(VIndex::default()));
 
-        let mut device_lock: std::sync::MutexGuard<VIndex<HashChunks>> = device.lock().unwrap();
-        for event in fs.quick_full_walk() {
-            apply_file_event(event, fs.clone(), &mut device_lock, device_peer_id.clone());
-        }
-        std::mem::drop(device_lock);
+        let vindex_for_thread = vindex.clone();
+        let drive2_for_thread = drive2.clone();
+        let drive_for_thread = drive.clone();
+        let thread = std::thread::spawn(move || loop {
+            let mut vindex = vindex_for_thread.lock();
+            let other_ops = drive_for_thread.vindex.lock().ops_after(&vindex.clock());
 
-        let device_for_watch = device.clone();
-        let fs_for_watch: Arc<LocalFileSystem> = fs.clone();
-        let watcher = fs.watch(Box::new(move |events| {
-            let mut device_lock: std::sync::MutexGuard<VIndex<HashChunks>> =
-                device_for_watch.lock().unwrap();
-            for event in events {
-                apply_file_event(
-                    event,
-                    fs_for_watch.clone(),
-                    &mut device_lock,
-                    device_peer_id.clone(),
-                );
+            for op in other_ops {
+                vindex.apply(op);
             }
-        }));
+
+            let other_ops = drive2_for_thread.vindex.lock().ops_after(&vindex.clock());
+
+            for op in other_ops {
+                vindex.apply(op);
+            }
+
+            std::mem::drop(vindex);
+
+            std::thread::sleep(Duration::from_secs(1))
+        });
 
         Self {
-            file_system: fs,
-            device,
-            watcher,
+            drive,
+            drive2,
+            vindex,
+            thread,
         }
     }
 }
 
 impl eframe::App for SyncingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(&ctx, |ui| {
-            ui.add(egui::Label::new("Hello World!"));
-            ui.label("A shorter and more convenient way to add a label.");
-            ui.text_edit_multiline(&mut tree_stringify(self.device.lock().unwrap().iter(), "/"));
-            if ui.button("Click me").clicked() {
-                // take some action here
-            }
+        egui::Window::new("drive1").show(&ctx, |ui| self.drive.debug_ui(ui));
+        egui::Window::new("drive2").show(&ctx, |ui| self.drive2.debug_ui(ui));
+        egui::Window::new("merged").show(&ctx, |ui| {
+            ui.text_edit_multiline(&mut tree_stringify(self.vindex.lock().iter(), "/"));
         });
     }
 }
@@ -100,9 +80,12 @@ impl eframe::App for SyncingApp {
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
+    std::fs::remove_dir_all(workspace!("cache"));
+    std::fs::remove_dir_all(workspace!("cache2"));
+
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
-        "Atomic Drive",
+        "Atomic Drive [Debug UI]",
         native_options,
         Box::new(|cc| {
             let mut fonts = egui::FontDefinitions::default();
