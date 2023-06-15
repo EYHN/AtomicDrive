@@ -8,10 +8,22 @@ use std::{
 pub type Result<T> = std::result::Result<T, error::Error>;
 
 #[derive(Debug)]
-pub struct LocalFileSystemWalkerItem {
-    pub path: PathBuf,
-    pub metadata: std::fs::Metadata,
-    pub children: Vec<(std::ffi::OsString, std::fs::Metadata)>,
+pub enum LocalFileSystemWalkerItem {
+    File(PathBuf, std::fs::Metadata),
+    Directory(
+        PathBuf,
+        std::fs::Metadata,
+        Vec<(std::ffi::OsString, std::fs::Metadata)>,
+    ),
+}
+
+impl LocalFileSystemWalkerItem {
+    pub fn path(&self) -> &Path {
+        match self {
+            LocalFileSystemWalkerItem::File(path, _) => path,
+            LocalFileSystemWalkerItem::Directory(path, _, _) => path,
+        }
+    }
 }
 
 pub struct LocalFileSystemWalkerIter<'a> {
@@ -33,31 +45,6 @@ impl<'a> Iterator for LocalFileSystemWalkerIter<'a> {
             Ok(None) => None,
             Err(err) => Some(Err(err)),
         }
-        // if self.walker.current.is_none() {
-        //     self.walker.start_new_walking();
-        // }
-        // if let Some(next) = self
-        //     .walker
-        //     .current
-        //     .as_mut()
-        //     .and_then(|c| c.next())
-        //     .map(|r| {
-        //         r.map_err(|e| error::Error::from(e)).and_then(|entry| {
-        //             Ok((
-        //                 entry.path().to_owned(),
-        //                 entry.file_type(),
-        //                 entry.metadata()?,
-        //             ))
-        //         })
-        //     })
-        // {
-        //     self.walker.current_position += 1;
-        //     Some(next)
-        // } else {
-        //     self.walker.current = None;
-        //     self.walker.total = Some(self.walker.current_position);
-        //     None
-        // }
     }
 }
 
@@ -77,7 +64,7 @@ impl std::ops::DerefMut for LocalFileSystemWalkerIter<'_> {
 
 pub struct LocalFileSystemWalker {
     root: PathBuf,
-    current_stack: LinkedList<(PathBuf)>,
+    current_stack: LinkedList<PathBuf>,
     total: Option<usize>,
     current_position: usize,
 }
@@ -104,26 +91,33 @@ impl LocalFileSystemWalker {
     }
 
     fn next(&mut self) -> Result<Option<LocalFileSystemWalkerItem>> {
-        let folder = self.current_stack.pop_front();
-        if let Some(folder_path) = folder {
-            let read_dir = std::fs::read_dir(&folder_path)?;
-            let folder_metadata = std::fs::metadata(&folder_path)?;
-            let mut children = vec![];
-            for entry in read_dir.into_iter() {
-                let child = entry?;
-                let file_type = child.file_type()?;
-                let file_name = child.file_name();
-                let file_metadata = child.metadata()?;
-                if !file_type.is_symlink() && file_type.is_dir() {
-                    self.current_stack.push_back(folder_path.join(&file_name))
+        let base = self.current_stack.pop_front();
+        if let Some(base_path) = base {
+            let base_metadata = std::fs::symlink_metadata(&base_path)?;
+            if base_metadata.is_dir() {
+                let read_dir = std::fs::read_dir(&base_path)?;
+                let mut children = vec![];
+                for entry in read_dir.into_iter() {
+                    let child = entry?;
+                    let file_type = child.file_type()?;
+                    let file_name = child.file_name();
+                    let file_metadata = child.metadata()?;
+                    if file_type.is_dir() {
+                        self.current_stack.push_back(base_path.join(&file_name))
+                    }
+                    children.push((file_name, file_metadata));
                 }
-                children.push((file_name, file_metadata));
+                Ok(Some(LocalFileSystemWalkerItem::Directory(
+                    base_path,
+                    base_metadata,
+                    children,
+                )))
+            } else {
+                Ok(Some(LocalFileSystemWalkerItem::File(
+                    base_path,
+                    base_metadata,
+                )))
             }
-            Ok(Some(LocalFileSystemWalkerItem {
-                path: folder_path,
-                metadata: folder_metadata,
-                children,
-            }))
         } else {
             self.start_new_walking();
             Ok(None)
@@ -139,10 +133,7 @@ mod tests {
     fn test() {
         let mut walker = LocalFileSystemWalker::new(std::fs::canonicalize("..").unwrap());
         walker.iter().for_each(|r| {
-            println!("{:?}", r.unwrap().path);
+            println!("{:?}", r.unwrap().path());
         });
-        // walker.iter().for_each(|r| {
-        //     println!("{:?}", r.unwrap().0);
-        // });
     }
 }
