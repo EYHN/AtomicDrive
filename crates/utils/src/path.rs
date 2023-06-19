@@ -406,7 +406,23 @@ impl PathTools {
         res
     }
 
-    // fn dive
+    pub fn dive(path: &str) -> impl Iterator<Item = &str> {
+        let mut positions = vec![];
+
+        for (i, char) in path.chars().enumerate() {
+            if char == Self::DIRECTORY_SEPARATOR_CHAR {
+                if positions.last() == Some(&i) || positions.is_empty() {
+                    positions.push(i + 1)
+                } else {
+                    positions.push(i)
+                }
+            }
+        }
+
+        positions.push(path.len());
+
+        positions.into_iter().map(|i| &path[0..i])
+    }
 }
 
 #[cfg(test)]
@@ -650,5 +666,29 @@ mod tests {
         assert_eq!("../baz", PathTools::relative("/baz-quux", "/baz"));
         assert_eq!("../baz-quux", PathTools::relative("/baz", "/baz-quux"));
         assert_eq!("../../..", PathTools::relative("/page1/page2/foo", "/"));
+    }
+
+    #[test]
+    fn dive_test() {
+        assert_eq!(
+            vec!["/", "/foo", "/foo/bar", "/foo/bar/c"],
+            PathTools::dive("/foo/bar/c").collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec!["/", "//", "//foo"],
+            PathTools::dive("//foo").collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec!["/", "/foo", "/foo/", "/foo//a"],
+            PathTools::dive("/foo//a").collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec!["/", "/foo", "/foo/", "/foo//"],
+            PathTools::dive("/foo//").collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec!["../", "../foo"],
+            PathTools::dive("../foo").collect::<Vec<_>>()
+        );
     }
 }

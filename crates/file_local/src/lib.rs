@@ -78,11 +78,11 @@ impl LocalFileSystem {
     }
 
     pub fn read_file(&self, path: FileFullPath) -> Vec<u8> {
-        std::fs::read(self.operator.convert_to_fspath(path)).unwrap()
+        std::fs::read(self.operator.convert_fspath(path)).unwrap()
     }
 
     pub unsafe fn map_file(&self, path: FileFullPath) -> Mmap {
-        let file = std::fs::File::open(self.operator.convert_to_fspath(path)).unwrap();
+        let file = std::fs::File::open(self.operator.convert_fspath(path)).unwrap();
 
         Mmap::map(&file).unwrap()
     }
@@ -109,63 +109,56 @@ impl LocalFileSystemOperator {
             let mut walker = walker::LocalFileSystemWalker::new(path);
             walker.start_new_walking();
             for item in walker.iter() {
-                if let Ok(item) = item {
-                    let item_path = self.convert_vpath(&item.path());
-                    if let Some(item_path) = item_path {
-                        match item {
+                if let Ok((Some(item_path), item)) =
+                    item.map(|i| (self.convert_vpath(&i.path()), i))
+                {
+                    let new_events = tracker
+                        .index(match item {
                             walker::LocalFileSystemWalkerItem::File(_, metadata) => {
-                                events.extend(
-                                    tracker
-                                        .index(tracker::IndexInput::File(
-                                            item_path.clone(),
-                                            metadata.file_type().into(),
-                                            calc_file_identifier(&item_path, &metadata),
-                                            calc_file_update_token(&metadata),
-                                        ))
-                                        .unwrap()
-                                        .into_iter()
-                                        .map(|e| e.into()),
-                                );
+                                tracker::IndexInput::File(
+                                    item_path.clone(),
+                                    metadata.file_type().into(),
+                                    calc_file_identifier(&item_path, &metadata),
+                                    calc_file_update_token(&metadata),
+                                )
                             }
                             walker::LocalFileSystemWalkerItem::Directory(_, metadata, children) => {
-                                events.extend(
-                                    tracker
-                                        .index(tracker::IndexInput::Directory(
-                                            item_path.clone(),
-                                            calc_file_identifier(&item_path, &metadata),
-                                            calc_file_update_token(&metadata),
-                                            children
-                                                .into_iter()
-                                                .filter_map(|(filename, metadata)| {
-                                                    let filename = filename.to_string_lossy();
-                                                    if filename.chars().any(|c| {
-                                                        c == std::char::REPLACEMENT_CHARACTER
-                                                    }) {
-                                                        None
-                                                    } else {
-                                                        Some((filename.to_string(), metadata))
-                                                    }
-                                                })
-                                                .map(|(file_name, metadata)| {
-                                                    (
-                                                        file_name.clone(),
-                                                        metadata.file_type().into(),
-                                                        calc_file_identifier(
-                                                            &item_path.join(&file_name),
-                                                            &metadata,
-                                                        ),
-                                                        calc_file_update_token(&metadata),
-                                                    )
-                                                })
-                                                .collect(),
-                                        ))
-                                        .unwrap()
+                                tracker::IndexInput::Directory(
+                                    item_path.clone(),
+                                    calc_file_identifier(&item_path, &metadata),
+                                    calc_file_update_token(&metadata),
+                                    children
                                         .into_iter()
-                                        .map(|e| e.into()),
-                                );
+                                        .filter_map(|(filename, metadata)| {
+                                            let filename = filename.to_string_lossy();
+                                            if filename
+                                                .chars()
+                                                .any(|c| c == std::char::REPLACEMENT_CHARACTER)
+                                            {
+                                                None
+                                            } else {
+                                                Some((filename.to_string(), metadata))
+                                            }
+                                        })
+                                        .map(|(file_name, metadata)| {
+                                            (
+                                                file_name.clone(),
+                                                metadata.file_type().into(),
+                                                calc_file_identifier(
+                                                    &item_path.join(&file_name),
+                                                    &metadata,
+                                                ),
+                                                calc_file_update_token(&metadata),
+                                            )
+                                        })
+                                        .collect(),
+                                )
                             }
-                        }
-                    }
+                        })
+                        .unwrap();
+                    events.extend(new_events.into_iter().map(|e| e.into()));
+                } else {
+                    todo!("record")
                 }
             }
         }
@@ -175,10 +168,13 @@ impl LocalFileSystemOperator {
     fn write_file(&self, path: FileFullPath, stats: FileStats, content: &[u8]) {
         let tracker = self.tracker.lock();
 
-        if PathTools::dirname(path.as_ref()) != "/" {
-            let dir_metadata = std::fs::symlink_metadata(
-                self.convert_to_fspath(FileFullPath::parse(PathTools::dirname(path.as_ref()))),
-            );
+        fo
+
+        let dirname = PathTools::dirname(path.as_ref());
+
+        if dirname != "/" {
+            let dir_metadata =
+                std::fs::symlink_metadata(self.convert_fspath(FileFullPath::parse(dirname)));
 
             match dir_metadata {
                 Ok(metadata) => {
@@ -188,6 +184,15 @@ impl LocalFileSystemOperator {
                 }
                 Err(err) => {
                     if err.kind() == std::io::ErrorKind::NotFound {
+                        for dirname in PathTools::dive(dirname) {
+                            let fspath = self.convert_fspath(FileFullPath::parse(dirname));
+                            let stats = std::fs::symlink_metadata(&fspath);
+                            if stats.is_dir() {
+                                continue;
+                            } else {
+                                todo!()
+                            }
+                        }
                     } else {
                         panic!("{:?}", err)
                     }
@@ -203,7 +208,7 @@ impl LocalFileSystemOperator {
     }
 
     fn stat(&self, path: FileFullPath) -> FileStats {
-        let metadata = std::fs::symlink_metadata(self.convert_to_fspath(path)).unwrap();
+        let metadata = std::fs::symlink_metadata(self.convert_fspath(path)).unwrap();
         FileStats {
             creation_time: 0,
             last_write_time: 0,
@@ -228,7 +233,7 @@ impl LocalFileSystemOperator {
         }
     }
 
-    fn convert_to_fspath(&self, path: FileFullPath) -> PathBuf {
+    fn convert_fspath(&self, path: FileFullPath) -> PathBuf {
         self.configuration
             .root
             .join(PathBuf::from(format!(".{}", path)))
