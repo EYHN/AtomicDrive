@@ -168,8 +168,6 @@ impl LocalFileSystemOperator {
     fn write_file(&self, path: FileFullPath, stats: FileStats, content: &[u8]) {
         let tracker = self.tracker.lock();
 
-        fo
-
         let dirname = PathTools::dirname(path.as_ref());
 
         if dirname != "/" {
@@ -186,7 +184,7 @@ impl LocalFileSystemOperator {
                     if err.kind() == std::io::ErrorKind::NotFound {
                         for dirname in PathTools::dive(dirname) {
                             let fspath = self.convert_fspath(FileFullPath::parse(dirname));
-                            let stats = std::fs::symlink_metadata(&fspath);
+                            let stats = std::fs::symlink_metadata(&fspath).unwrap();
                             if stats.is_dir() {
                                 continue;
                             } else {
