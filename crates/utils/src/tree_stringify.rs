@@ -18,7 +18,6 @@ pub fn tree_stringify<
     let mut entities = entities.collect::<Vec<_>>();
     entities.sort_by_key(|v| v.0);
 
-    // let mut stack = vec![];
     for entity in entities.iter() {
         let (path, content) = entity;
         let parts: Vec<_> = path.split(pat).filter(|part| part.len() > 0).collect();
@@ -69,20 +68,14 @@ pub fn tree_stringify<
             let output_content = if entry.content.is_empty() {
                 Default::default()
             } else {
-                format!(" [{}]", entry.content)
+                format!(" {}", entry.content)
             };
 
             if count == i + 1 {
-                str.push_str(&format!(
-                    "{}└ {}{}\n",
-                    new_prefix, key, output_content
-                ));
+                str.push_str(&format!("{}└ {}{}\n", new_prefix, key, output_content));
                 new_prefix.push_str(" ");
             } else {
-                str.push_str(&format!(
-                    "{}├ {}{}\n",
-                    new_prefix, key, output_content
-                ));
+                str.push_str(&format!("{}├ {}{}\n", new_prefix, key, output_content));
                 new_prefix.push_str("│");
             }
 
