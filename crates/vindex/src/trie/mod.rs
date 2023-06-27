@@ -23,6 +23,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub trait TrieContent: Clone + Hash + Default {}
 impl<A: Clone + Hash + Default> TrieContent for A {}
 
+pub trait TrieClock: PartialOrd + Clone + Hash {}
+impl<A: PartialOrd + Clone + Hash> TrieClock for A {}
+
 const ROOT: TrieId = TrieId(0);
 const CONFLICT: TrieId = TrieId(1);
 
@@ -88,8 +91,8 @@ struct TrieNode<C> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Op<A: Actor, C: TrieContent> {
-    clock: VClock<A>,
+pub struct Op<V: TrieClock, A: Actor, C: TrieContent> {
+    clock: V,
     actor: A,
     parent_ref: TrieRef,
     child_key: TrieKey,
@@ -98,8 +101,8 @@ pub struct Op<A: Actor, C: TrieContent> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct LogOp<A: Actor, C: TrieContent> {
-    op: Op<A, C>,
+struct LogOp<V: TrieClock, A: Actor, C: TrieContent> {
+    op: Op<V, A, C>,
     undos: Vec<Undo<C>>,
 }
 
@@ -110,40 +113,25 @@ enum ConflictMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Undo<C: TrieContent> {
-    DeleteRef(TrieRef),
-    RedirectRef(TrieRef, TrieId),
+enum Do<C: TrieContent> {
+    Ref(TrieRef, Option<TrieId>),
     Move {
         id: TrieId,
         to: Option<(TrieId, TrieKey, C)>,
     },
 }
 
-// impl<A: Actor + Debug, C: TrieContent + Debug> Debug for LogOp<A, C> {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         let mut f = if let Some(from) = &self.from {
-//             f.debug_struct(&format!(
-//                 "LogOp(`{:?}` moved {} -> {}[{}] from {}[{}])",
-//                 self.op.actor, self.op.child_ref, self.op.parent_ref, self.op.child_key, from.0, from.1
-//             ))
-//         } else {
-//             f.debug_struct(&format!(
-//                 "LogOp(`{:?}` moved {} -> {}[{}])",
-//                 self.op.actor, self.child_id, self.parent_id, self.child_key
-//             ))
-//         };
-
-//         f.field("content", &self.op.child_content);
-//         if let Some(old) = &self.from {
-//             f.field("old_content", &old.2);
-//         }
-
-//         f.finish()
-//     }
-// }
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Undo<C: TrieContent> {
+    Ref(TrieRef, Option<TrieId>),
+    Move {
+        id: TrieId,
+        to: Option<(TrieId, TrieKey, C)>,
+    },
+}
 
 #[derive(Debug)]
-struct Trie<A: Actor, C: TrieContent> {
+struct Trie<V: TrieClock, A: Actor, C: TrieContent> {
     /// id -> node
     tree: HashMap<TrieId, TrieNode<C>>,
     /// ref <-> id index
@@ -151,10 +139,10 @@ struct Trie<A: Actor, C: TrieContent> {
 
     auto_increment_id: TrieId,
 
-    log: LinkedList<LogOp<A, C>>,
+    log: LinkedList<LogOp<V, A, C>>,
 }
 
-impl<A: Actor, C: TrieContent + Display> Display for Trie<A, C> {
+impl<V: TrieClock, A: Actor, C: TrieContent + Display> Display for Trie<V, A, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut items = vec![];
         self.itemization(TrieId(0), "", &mut items);
@@ -171,7 +159,7 @@ impl<A: Actor, C: TrieContent + Display> Display for Trie<A, C> {
     }
 }
 
-impl<A: Actor, C: TrieContent> Default for Trie<A, C> {
+impl<V: TrieClock, A: Actor, C: TrieContent> Default for Trie<V, A, C> {
     fn default() -> Self {
         Trie {
             tree: HashMap::from([
@@ -206,13 +194,20 @@ impl<A: Actor, C: TrieContent> Default for Trie<A, C> {
     }
 }
 
-impl<A: Actor, C: TrieContent> Trie<A, C> {
+impl<V: TrieClock, A: Actor, C: TrieContent> Trie<V, A, C> {
     fn ref_to_id(&self, r: &TrieRef) -> Option<&TrieId> {
         self.ref_id_index.0.get(r)
     }
 
     fn get(&self, id: &TrieId) -> Option<&TrieNode<C>> {
         self.tree.get(id)
+    }
+
+    fn get_ensure(&self, id: &TrieId) -> Result<&TrieNode<C>> {
+        self.tree.get(id).ok_or(Error::TreeBroken(
+            format!("Trie id {id} not found"),
+            Backtrace::capture(),
+        ))
     }
 
     /// returns true if ancestor_id is an ancestor of child_id in tree.
@@ -248,7 +243,7 @@ impl<A: Actor, C: TrieContent> Trie<A, C> {
         false
     }
 
-    pub fn write(&mut self) -> TrieUpdater<'_, A, C> {
+    pub fn write(&mut self) -> TrieUpdater<'_, V, A, C> {
         TrieUpdater { target: self }
     }
 
@@ -269,65 +264,40 @@ impl<A: Actor, C: TrieContent> Trie<A, C> {
     }
 }
 
-struct TrieUpdater<'a, A: Actor, C: TrieContent> {
-    target: &'a mut Trie<A, C>,
+struct TrieUpdater<'a, V: TrieClock, A: Actor, C: TrieContent> {
+    target: &'a mut Trie<V, A, C>,
 }
 
-impl<A: Actor, C: TrieContent> TrieUpdater<'_, A, C> {
-    fn create_ref(&mut self, r: TrieRef, id: TrieId) -> Result<()> {
-        if self
-            .target
-            .ref_id_index
-            .0
-            .insert(r.to_owned(), self.target.auto_increment_id)
-            .is_some()
-        {
-            return Err(Error::TreeBroken(
-                format!("ref {r:?} already exsits"),
-                std::backtrace::Backtrace::capture(),
-            ));
-        }
-        match self.target.ref_id_index.1.entry(id) {
-            HashMapEntry::Occupied(mut entry) => {
-                if !entry.get_mut().insert(r.to_owned()) {
-                    return Err(Error::TreeBroken(
-                        format!("ref {r:?} already exsits"),
-                        std::backtrace::Backtrace::capture(),
-                    ));
-                }
-            }
-            HashMapEntry::Vacant(entry) => {
-                entry.insert(HashSet::from([r]));
-            }
-        }
-        Ok(())
-    }
-
-    fn redirect_ref(&mut self, r: TrieRef, id: TrieId) -> Result<()> {
-        self.remove_ref(&r)?;
-        self.create_ref(r, id)?;
-        Ok(())
-    }
-
-    fn get_refs(&mut self, id: &TrieId) -> Option<&HashSet<TrieRef>> {
-        self.target.ref_id_index.1.get(id)
-    }
-
-    fn remove_ref(&mut self, r: &TrieRef) -> Result<()> {
-        if let Some(id) = self.target.ref_id_index.0.remove(&r) {
+impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
+    fn do_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Option<TrieId> {
+        let old_id = if let Some(id) = self.target.ref_id_index.0.get(&r) {
             if let Some(refs) = self.target.ref_id_index.1.get_mut(&id) {
                 if refs.remove(&r) {
                     if refs.is_empty() {
                         self.target.ref_id_index.1.remove(&id);
                     }
-                    return Ok(());
+                }
+            }
+            Some(id.to_owned())
+        } else {
+            None
+        };
+        if let Some(id) = id {
+            self.target.ref_id_index.0.insert(r.to_owned(), id);
+            match self.target.ref_id_index.1.entry(id) {
+                HashMapEntry::Occupied(mut entry) => {
+                    entry.get_mut().insert(r.to_owned());
+                }
+                HashMapEntry::Vacant(entry) => {
+                    entry.insert(HashSet::from([r]));
                 }
             }
         }
-        return Err(Error::TreeBroken(
-            format!("ref {r:?} not found"),
-            std::backtrace::Backtrace::capture(),
-        ));
+        old_id
+    }
+
+    fn get_refs(&mut self, id: &TrieId) -> Option<&HashSet<TrieRef>> {
+        self.target.ref_id_index.1.get(id)
     }
 
     fn create_id(&mut self) -> TrieId {
@@ -335,7 +305,11 @@ impl<A: Actor, C: TrieContent> TrieUpdater<'_, A, C> {
         self.target.auto_increment_id
     }
 
-    fn move_node(&mut self, id: TrieId, to: Option<(TrieId, TrieKey, C)>) -> Result<()> {
+    fn move_node(
+        &mut self,
+        id: TrieId,
+        to: Option<(TrieId, TrieKey, C)>,
+    ) -> Result<Option<(TrieId, TrieKey, C)>> {
         let node = self.target.tree.remove(&id);
 
         if let Some(node) = &node {
@@ -375,23 +349,25 @@ impl<A: Actor, C: TrieContent> TrieUpdater<'_, A, C> {
                     parent: to.0,
                     key: to.1,
                     hash: Default::default(),
-                    children: node.map(|n| n.children).unwrap_or_default(),
+                    children: node
+                        .as_ref()
+                        .map(|n| n.children.clone())
+                        .unwrap_or_default(),
                     content: to.2,
                 },
             );
         }
 
-        Ok(())
+        Ok(node.map(|n| (n.parent, n.key, n.content)))
     }
 
-    fn do_op(&mut self, op: Op<A, C>) -> Result<LogOp<A, C>> {
-        let mut undos: VecDeque<Undo<C>> = Default::default();
+    fn do_op(&mut self, op: Op<V, A, C>) -> Result<LogOp<V, A, C>> {
+        let mut dos: Vec<Do<C>> = Default::default();
         let child_id = if let Some(child_id) = self.target.ref_to_id(&op.child_ref) {
             child_id.to_owned()
         } else {
             let new_id = self.create_id();
-            self.create_ref(op.child_ref.to_owned(), new_id)?;
-            undos.push_front(Undo::DeleteRef(op.child_ref.to_owned()));
+            dos.push(Do::Ref(op.child_ref.to_owned(), Some(new_id)));
             new_id
         };
         let parent_id = if let Some(parent_id) = self.target.ref_to_id(&op.parent_ref) {
@@ -403,141 +379,79 @@ impl<A: Actor, C: TrieContent> TrieUpdater<'_, A, C> {
             ));
         };
 
+        let parent_node = self.target.get_ensure(&parent_id)?;
+
         // ensures no cycles are introduced.
-        if child_id != parent_id && !self.target.is_ancestor(&parent_id, &child_id) {
-            let parent_node = if let Some(parent_node) = self.target.get(&parent_id) {
-                parent_node
-            } else {
-                return Err(Error::TreeBroken(
-                    format!("parent node not found {}", parent_id),
-                    std::backtrace::Backtrace::capture(),
-                ));
-            };
-            let old_node = self.target.get(&child_id).cloned();
-            let conflict_mode =
+        'c: {
+            if child_id != parent_id && !self.target.is_ancestor(&parent_id, &child_id) {
+                let old_node = self.target.get(&child_id);
+
                 if let Some(conflict_node_id) = parent_node.children.get(&op.child_key).cloned() {
                     if conflict_node_id != child_id {
-                        Some((conflict_node_id, {
-                            let conflict_node = if let Some(conflict_node) =
-                                self.target.get(&conflict_node_id).to_owned()
-                            {
-                                conflict_node
-                            } else {
-                                return Err(Error::TreeBroken(
-                                    format!("conflict node not found {}", parent_id),
-                                    std::backtrace::Backtrace::capture(),
-                                ));
-                            };
-                            if conflict_node.children.is_empty() {
-                                ConflictMode::KeepNew
-                            } else {
-                                if old_node
-                                    .as_ref()
-                                    .map(|n| n.children.is_empty())
-                                    .unwrap_or(true)
-                                {
-                                    // new is empty
-                                    ConflictMode::KeepBefore
-                                } else {
-                                    ConflictMode::KeepNew
-                                }
+                        let conflict_node = self.target.get_ensure(&conflict_node_id)?.to_owned();
+                        let conflict_is_empty = conflict_node.children.is_empty();
+                        let new_is_empty = old_node.map(|n| n.children.is_empty()).unwrap_or(true);
+                        if !conflict_is_empty && new_is_empty {
+                            // new is empty, keep before
+                            dos.push(Do::Ref(op.child_ref.to_owned(), Some(conflict_node_id)));
+
+                            dos.push(Do::Move {
+                                id: child_id,
+                                to: Some((
+                                    CONFLICT,
+                                    TrieKey(child_id.to_string()),
+                                    op.child_content.to_owned(),
+                                )),
+                            });
+                            break 'c;
+                        } else {
+                            // keep new
+                            let refs = self
+                                .get_refs(&conflict_node_id)
+                                .map(|r| r.iter().cloned().collect::<Vec<_>>())
+                                .unwrap_or_default();
+
+                            for r in refs {
+                                dos.push(Do::Ref(r, Some(child_id)));
                             }
-                        }))
-                    } else {
-                        None
+
+                            dos.push(Do::Move {
+                                id: conflict_node_id,
+                                to: Some((
+                                    CONFLICT,
+                                    TrieKey(conflict_node_id.to_string()),
+                                    conflict_node.content.to_owned(),
+                                )),
+                            });
+
+                            dos.push(Do::Move {
+                                id: child_id,
+                                to: Some((
+                                    parent_id,
+                                    TrieKey(op.child_key.to_string()),
+                                    op.child_content.to_owned(),
+                                )),
+                            });
+                            break 'c;
+                        }
                     }
-                } else {
-                    None
                 };
 
-            match conflict_mode {
-                Some((conflict_node_id, ConflictMode::KeepBefore)) => {
-                    self.redirect_ref(op.child_ref.to_owned(), conflict_node_id)?;
-                    undos.push_front(Undo::RedirectRef(op.child_ref.to_owned(), child_id));
-
-                    self.move_node(
-                        child_id,
-                        Some((
-                            CONFLICT,
-                            TrieKey(child_id.to_string()),
-                            op.child_content.to_owned(),
-                        )),
-                    )?;
-                    undos.push_front(Undo::Move {
-                        id: child_id,
-                        to: old_node
-                            .as_ref()
-                            .map(|n| (n.parent, n.key.to_owned(), n.content.to_owned())),
-                    });
-                }
-                Some((conflict_node_id, ConflictMode::KeepNew)) => {
-                    let refs = self
-                        .get_refs(&conflict_node_id)
-                        .map(|r| r.iter().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
-
-                    for r in refs {
-                        self.redirect_ref(r.to_owned(), child_id)?;
-                        undos.push_front(Undo::RedirectRef(r, conflict_node_id));
-                    }
-
-                    let conflict_node = if let Some(conflict_node) =
-                        self.target.get(&conflict_node_id).to_owned()
-                    {
-                        conflict_node.clone()
-                    } else {
-                        return Err(Error::TreeBroken(
-                            format!("conflict node not found {}", parent_id),
-                            std::backtrace::Backtrace::capture(),
-                        ));
-                    };
-
-                    self.move_node(
-                        conflict_node_id,
-                        Some((
-                            CONFLICT,
-                            TrieKey(conflict_node_id.to_string()),
-                            conflict_node.content.to_owned(),
-                        )),
-                    )?;
-                    undos.push_front(Undo::Move {
-                        id: conflict_node_id,
-                        to: Some((
-                            conflict_node.parent,
-                            conflict_node.key,
-                            conflict_node.content,
-                        )),
-                    });
-
-                    self.move_node(
-                        child_id,
-                        Some((
-                            parent_id,
-                            op.child_key.to_owned(),
-                            op.child_content.to_owned(),
-                        )),
-                    )?;
-                    undos.push_front(Undo::Move {
-                        id: child_id,
-                        to: old_node.map(|n| (n.parent, n.key, n.content)),
-                    });
-                }
-                None => {
-                    self.move_node(
-                        child_id,
-                        Some((
-                            parent_id,
-                            op.child_key.to_owned(),
-                            op.child_content.to_owned(),
-                        )),
-                    )?;
-
-                    undos.push_front(Undo::Move {
-                        id: child_id,
-                        to: old_node.map(|n| (n.parent, n.key, n.content)),
-                    });
-                }
+                dos.push(Do::Move {
+                    id: child_id,
+                    to: Some((
+                        parent_id,
+                        TrieKey(op.child_key.to_string()),
+                        op.child_content.to_owned(),
+                    )),
+                });
             }
+        }
+
+        let mut undos: VecDeque<_> = VecDeque::new();
+
+        for d in dos {
+            undos.push_front(self.exec_do(d)?)
         }
 
         Ok(LogOp {
@@ -546,23 +460,43 @@ impl<A: Actor, C: TrieContent> TrieUpdater<'_, A, C> {
         })
     }
 
-    fn undo_op(&mut self, log: &LogOp<A, C>) -> Result<()> {
-        for undo in log.undos.iter().cloned() {
-            match undo {
-                Undo::DeleteRef(r) => self.remove_ref(&r)?,
-                Undo::RedirectRef(r, id) => self.redirect_ref(r, id)?,
-                Undo::Move { id, to } => self.move_node(id, to)?,
+    fn exec_do(&mut self, d: Do<C>) -> Result<Undo<C>> {
+        Ok(match d {
+            Do::Ref(r, id) => {
+                let old_id = self.do_ref(r.to_owned(), id);
+                Undo::Ref(r, old_id)
             }
+            Do::Move { id, to } => {
+                let old = self.move_node(id, to)?;
+                Undo::Move { id, to: old }
+            }
+        })
+    }
+
+    fn exec_undo(&mut self, d: Undo<C>) -> Result<()> {
+        Ok(match d {
+            Undo::Ref(r, id) => {
+                self.do_ref(r, id);
+            }
+            Undo::Move { id, to } => {
+                self.move_node(id, to)?;
+            }
+        })
+    }
+
+    fn undo_op(&mut self, log: &LogOp<V, A, C>) -> Result<()> {
+        for undo in log.undos.iter().cloned() {
+            self.exec_undo(undo)?
         }
 
         Ok(())
     }
 
-    fn redo_op(&mut self, log: &LogOp<A, C>) -> Result<LogOp<A, C>> {
+    fn redo_op(&mut self, log: &LogOp<V, A, C>) -> Result<LogOp<V, A, C>> {
         self.do_op(log.op.clone())
     }
 
-    fn apply(&mut self, ops: Vec<Op<A, C>>) -> Result<()> {
+    fn apply(&mut self, ops: Vec<Op<V, A, C>>) -> Result<()> {
         let mut redo_queue = VecDeque::new();
         if let Some(first_op) = ops.first() {
             loop {
@@ -627,46 +561,44 @@ impl<A: Actor, C: TrieContent> TrieUpdater<'_, A, C> {
 
 #[cfg(test)]
 mod tests {
-    use crdts::{CmRDT, VClock};
+    use crate::trie::TrieUpdater;
 
     use super::{Op, Trie, TrieKey, TrieRef};
 
     #[test]
     fn test() {
-        let mut clock = VClock::new();
-        let mut t = Trie::<u64, String>::default();
+        let mut t = Trie::<u64, u64, String>::default();
         let mut w = t.write();
-        clock.apply(clock.inc(1));
-        w.apply(vec![Op {
-            clock: clock.to_owned(),
-            actor: 1,
-            parent_ref: TrieRef(0),
-            child_key: TrieKey("abc".to_string()),
-            child_ref: TrieRef(1),
-            child_content: "test folder".to_string(),
-        }])
-        .unwrap();
-        clock.apply(clock.inc(1));
-        let clock_2 = clock.clone();
-        clock.apply(clock.inc(1));
-        w.apply(vec![Op {
-            clock: clock,
-            actor: 1,
-            parent_ref: TrieRef(1),
-            child_key: TrieKey("hello".to_string()),
-            child_ref: TrieRef(2),
-            child_content: "test file".to_string(),
-        }])
-        .unwrap();
-        w.apply(vec![Op {
-            clock: clock_2,
-            actor: 1,
-            parent_ref: TrieRef(1),
-            child_key: TrieKey("hello".to_string()),
-            child_ref: TrieRef(2),
-            child_content: "test file 2".to_string(),
-        }])
-        .unwrap();
+        fn mov(
+            w: &mut TrieUpdater<'_, u64, u64, String>,
+            clock: u64,
+            p: u128,
+            k: &str,
+            c: u128,
+            data: &str,
+        ) {
+            w.apply(vec![Op {
+                clock,
+                actor: 1,
+                parent_ref: TrieRef(p),
+                child_key: TrieKey(k.to_string()),
+                child_ref: TrieRef(c),
+                child_content: data.to_string(),
+            }])
+            .unwrap();
+        }
+        mov(&mut w, 1, 0, "abc", 1, "test folder");
+        mov(&mut w, 3, 1, "hello", 2, "test file");
+        mov(&mut w, 2, 1, "hello", 2, "test file2");
+        mov(&mut w, 4, 0, "abc", 3, "test folder 2");
+        mov(&mut w, 5, 3, "hello2", 4, "test file212");
+        mov(&mut w, 6, 1, "hello3", 4, "test file212");
+        mov(&mut w, 7, 1, "hello3", 4, "test file212");
+        mov(&mut w, 8, 2, "world", 5, "test");
+        mov(&mut w, 9, 0, "world", 2, "aaa");
+        mov(&mut w, 10, 0, "abc", 2, "aaa");
+        mov(&mut w, 11, 1, "cewafewa", 6, "aaaa");
+
         w.commit().unwrap();
         dbg!(&t);
 
