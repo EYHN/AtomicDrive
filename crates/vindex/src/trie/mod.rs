@@ -5,17 +5,19 @@ use std::{
     fmt::Display,
 };
 
-use crdts::{Actor, VClock};
 use std::fmt::Debug;
 use thiserror::Error;
 use utils::tree_stringify;
+use uuid::Uuid;
 
 use std::hash::Hash;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Operation may break the tree, or the tree is already broken. message: `{0}`")]
+    #[error("Operation may break the tree, or the tree is already broken. {0}")]
     TreeBroken(String, Backtrace),
+    #[error("Invalid Operation, {0}")]
+    InvalidOp(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -23,8 +25,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub trait TrieContent: Clone + Hash + Default {}
 impl<A: Clone + Hash + Default> TrieContent for A {}
 
-pub trait TrieClock: PartialOrd + Clone + Hash {}
-impl<A: PartialOrd + Clone + Hash> TrieClock for A {}
+pub trait TrieMarker: PartialOrd + Clone + Hash {}
+impl<A: PartialOrd + Clone + Hash> TrieMarker for A {}
 
 const ROOT: TrieId = TrieId(0);
 const CONFLICT: TrieId = TrieId(1);
@@ -59,6 +61,12 @@ impl Display for TrieKey {
 #[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
 pub struct TrieRef(u128);
 
+impl TrieRef {
+    pub fn new() -> Self {
+        TrieRef(Uuid::new_v4().to_u128_le())
+    }
+}
+
 impl Display for TrieRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Display::fmt(&self.0, f)
@@ -91,9 +99,8 @@ struct TrieNode<C> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Op<V: TrieClock, A: Actor, C: TrieContent> {
-    clock: V,
-    actor: A,
+pub struct Op<M: TrieMarker, C: TrieContent> {
+    marker: M,
     parent_ref: TrieRef,
     child_key: TrieKey,
     child_ref: TrieRef,
@@ -101,8 +108,8 @@ pub struct Op<V: TrieClock, A: Actor, C: TrieContent> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct LogOp<V: TrieClock, A: Actor, C: TrieContent> {
-    op: Op<V, A, C>,
+struct LogOp<M: TrieMarker, C: TrieContent> {
+    op: Op<M, C>,
     undos: Vec<Undo<C>>,
 }
 
@@ -130,8 +137,8 @@ enum Undo<C: TrieContent> {
     },
 }
 
-#[derive(Debug)]
-struct Trie<V: TrieClock, A: Actor, C: TrieContent> {
+#[derive(Clone, PartialEq, Eq)]
+struct Trie<M: TrieMarker, C: TrieContent> {
     /// id -> node
     tree: HashMap<TrieId, TrieNode<C>>,
     /// ref <-> id index
@@ -139,10 +146,31 @@ struct Trie<V: TrieClock, A: Actor, C: TrieContent> {
 
     auto_increment_id: TrieId,
 
-    log: LinkedList<LogOp<V, A, C>>,
+    log: LinkedList<LogOp<M, C>>,
 }
 
-impl<V: TrieClock, A: Actor, C: TrieContent + Display> Display for Trie<V, A, C> {
+impl<M: TrieMarker, C: TrieContent + Display> Display for Trie<M, C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut items = vec![];
+        self.itemization(TrieId(0), "", &mut items);
+
+        f.write_str(&tree_stringify(
+            items.iter().map(|(path, id, node)| {
+                (
+                    path.as_ref(),
+                    if node.content.to_string().is_empty() {
+                        "".to_string()
+                    } else {
+                        format!("[{}]", node.content.to_string())
+                    },
+                )
+            }),
+            "/",
+        ))
+    }
+}
+
+impl<M: TrieMarker, C: TrieContent + Display> Debug for Trie<M, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut items = vec![];
         self.itemization(TrieId(0), "", &mut items);
@@ -159,7 +187,7 @@ impl<V: TrieClock, A: Actor, C: TrieContent + Display> Display for Trie<V, A, C>
     }
 }
 
-impl<V: TrieClock, A: Actor, C: TrieContent> Default for Trie<V, A, C> {
+impl<M: TrieMarker, C: TrieContent> Default for Trie<M, C> {
     fn default() -> Self {
         Trie {
             tree: HashMap::from([
@@ -194,9 +222,13 @@ impl<V: TrieClock, A: Actor, C: TrieContent> Default for Trie<V, A, C> {
     }
 }
 
-impl<V: TrieClock, A: Actor, C: TrieContent> Trie<V, A, C> {
-    fn ref_to_id(&self, r: &TrieRef) -> Option<&TrieId> {
+impl<M: TrieMarker, C: TrieContent> Trie<M, C> {
+    fn get_id(&self, r: &TrieRef) -> Option<&TrieId> {
         self.ref_id_index.0.get(r)
+    }
+
+    fn get_refs(&self, id: &TrieId) -> Option<&HashSet<TrieRef>> {
+        self.ref_id_index.1.get(id)
     }
 
     fn get(&self, id: &TrieId) -> Option<&TrieNode<C>> {
@@ -243,7 +275,7 @@ impl<V: TrieClock, A: Actor, C: TrieContent> Trie<V, A, C> {
         false
     }
 
-    pub fn write(&mut self) -> TrieUpdater<'_, V, A, C> {
+    pub fn write(&mut self) -> TrieUpdater<'_, M, C> {
         TrieUpdater { target: self }
     }
 
@@ -264,11 +296,11 @@ impl<V: TrieClock, A: Actor, C: TrieContent> Trie<V, A, C> {
     }
 }
 
-struct TrieUpdater<'a, V: TrieClock, A: Actor, C: TrieContent> {
-    target: &'a mut Trie<V, A, C>,
+struct TrieUpdater<'a, M: TrieMarker, C: TrieContent> {
+    target: &'a mut Trie<M, C>,
 }
 
-impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
+impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
     fn do_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Option<TrieId> {
         let old_id = if let Some(id) = self.target.ref_id_index.0.get(&r) {
             if let Some(refs) = self.target.ref_id_index.1.get_mut(&id) {
@@ -294,10 +326,6 @@ impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
             }
         }
         old_id
-    }
-
-    fn get_refs(&mut self, id: &TrieId) -> Option<&HashSet<TrieRef>> {
-        self.target.ref_id_index.1.get(id)
     }
 
     fn create_id(&mut self) -> TrieId {
@@ -361,16 +389,16 @@ impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
         Ok(node.map(|n| (n.parent, n.key, n.content)))
     }
 
-    fn do_op(&mut self, op: Op<V, A, C>) -> Result<LogOp<V, A, C>> {
+    fn do_op(&mut self, op: Op<M, C>) -> Result<LogOp<M, C>> {
         let mut dos: Vec<Do<C>> = Default::default();
-        let child_id = if let Some(child_id) = self.target.ref_to_id(&op.child_ref) {
+        let child_id = if let Some(child_id) = self.target.get_id(&op.child_ref) {
             child_id.to_owned()
         } else {
             let new_id = self.create_id();
             dos.push(Do::Ref(op.child_ref.to_owned(), Some(new_id)));
             new_id
         };
-        let parent_id = if let Some(parent_id) = self.target.ref_to_id(&op.parent_ref) {
+        let parent_id = if let Some(parent_id) = self.target.get_id(&op.parent_ref) {
             parent_id.to_owned()
         } else {
             return Err(Error::TreeBroken(
@@ -407,6 +435,7 @@ impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
                         } else {
                             // keep new
                             let refs = self
+                                .target
                                 .get_refs(&conflict_node_id)
                                 .map(|r| r.iter().cloned().collect::<Vec<_>>())
                                 .unwrap_or_default();
@@ -484,7 +513,7 @@ impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
         })
     }
 
-    fn undo_op(&mut self, log: &LogOp<V, A, C>) -> Result<()> {
+    fn undo_op(&mut self, log: &LogOp<M, C>) -> Result<()> {
         for undo in log.undos.iter().cloned() {
             self.exec_undo(undo)?
         }
@@ -492,16 +521,16 @@ impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
         Ok(())
     }
 
-    fn redo_op(&mut self, log: &LogOp<V, A, C>) -> Result<LogOp<V, A, C>> {
+    fn redo_op(&mut self, log: &LogOp<M, C>) -> Result<LogOp<M, C>> {
         self.do_op(log.op.clone())
     }
 
-    fn apply(&mut self, ops: Vec<Op<V, A, C>>) -> Result<()> {
+    fn apply(&mut self, ops: Vec<Op<M, C>>) -> Result<&mut Self> {
         let mut redo_queue = VecDeque::new();
         if let Some(first_op) = ops.first() {
             loop {
                 if let Some(last) = self.target.log.pop_back() {
-                    match first_op.clock.partial_cmp(&last.op.clock) {
+                    match first_op.marker.partial_cmp(&last.op.marker) {
                         None | Some(Ordering::Equal) => {
                             panic!("op with timestamp equal to previous op ignored. (not applied).  Every op must have a unique timestamp.");
                         }
@@ -522,9 +551,11 @@ impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
         for op in ops {
             loop {
                 if let Some(redo) = redo_queue.pop_front() {
-                    match op.clock.partial_cmp(&redo.op.clock) {
+                    match op.marker.partial_cmp(&redo.op.marker) {
                         None | Some(Ordering::Equal) => {
-                            panic!("op with timestamp equal to previous op ignored. (not applied).  Every op must have a unique timestamp.");
+                            return Err(Error::InvalidOp(
+                                "The marker of the operation has duplicates. Every op must have a unique timestamp.".to_string(),
+                            ));
                         }
                         Some(Ordering::Less) => {
                             let log_op = self.do_op(op)?;
@@ -551,7 +582,7 @@ impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
             self.target.log.push_back(redo);
         }
 
-        Ok(())
+        Ok(self)
     }
 
     pub fn commit(&mut self) -> Result<()> {
@@ -561,47 +592,386 @@ impl<V: TrieClock, A: Actor, C: TrieContent> TrieUpdater<'_, V, A, C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::trie::TrieUpdater;
+    use std::collections::VecDeque;
 
-    use super::{Op, Trie, TrieKey, TrieRef};
+    use crdts::{CmRDT, VClock};
+    use utils::PathTools;
+
+    use indoc::indoc;
+
+    use super::{Op, Trie, TrieId, TrieKey, TrieRef};
+
+    #[derive(Debug, Hash, Clone, PartialEq, Eq)]
+    struct Marker {
+        actor: u64,
+        clock: VClock<u64>,
+        time: u64,
+    }
+
+    impl Ord for Marker {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            match self.clock.partial_cmp(&other.clock) {
+                Some(std::cmp::Ordering::Equal) | None => match self.time.cmp(&other.time) {
+                    std::cmp::Ordering::Equal => self.actor.cmp(&other.actor),
+                    ord => ord,
+                },
+                Some(ord) => ord,
+            }
+        }
+    }
+
+    impl PartialOrd for Marker {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct End {
+        actor: u64,
+        clock: VClock<u64>,
+        time: u64,
+        trie: Trie<Marker, String>,
+    }
+
+    impl End {
+        fn new(a: u64) -> Self {
+            return End {
+                actor: a.to_owned(),
+                clock: Default::default(),
+                time: 0,
+                trie: Default::default(),
+            };
+        }
+
+        fn clone_as(&self, a: u64) -> Self {
+            let mut new = self.clone();
+            new.actor = a;
+            new
+        }
+
+        fn ops_after(&self, after: &VClock<u64>) -> Vec<Op<Marker, String>> {
+            let mut result = VecDeque::new();
+            for log in self.trie.log.iter().rev() {
+                let log_dot = log.op.marker.clock.dot(log.op.marker.actor.clone());
+                if log_dot > after.dot(log_dot.actor.clone()) {
+                    result.push_front(log.op.clone())
+                }
+            }
+
+            return result.into_iter().collect();
+        }
+
+        fn sync_with(&mut self, other: &mut Self) {
+            let other_ops = other.ops_after(&self.clock);
+            self.apply(other_ops);
+
+            let self_ops = self.ops_after(&other.clock);
+            other.apply(self_ops);
+        }
+
+        fn apply(&mut self, ops: Vec<Op<Marker, String>>) {
+            for op in ops.iter() {
+                self.clock
+                    .apply(op.marker.clock.dot(op.marker.actor.clone()))
+            }
+            self.trie.write().apply(ops).unwrap().commit();
+        }
+
+        fn get_id(&self, path: &str) -> TrieId {
+            let mut id = TrieId(0);
+            if path != "/" {
+                for part in path.split('/').skip(1) {
+                    id = *self
+                        .trie
+                        .get(&id)
+                        .unwrap()
+                        .children
+                        .get(&TrieKey(part.to_string()))
+                        .unwrap()
+                }
+            }
+
+            id
+        }
+
+        fn get_ref(&self, path: &str) -> TrieRef {
+            let id = self.get_id(path);
+            self.trie
+                .get_refs(&id)
+                .unwrap()
+                .iter()
+                .next()
+                .unwrap()
+                .to_owned()
+        }
+
+        fn get_content(&self, path: &str) -> String {
+            let id = self.get_id(path);
+            self.trie.get(&id).unwrap().content.to_owned()
+        }
+
+        fn rename(&mut self, from: &str, to: &str) {
+            let content = self.get_content(from);
+            let from = self.get_ref(from);
+            let filename = PathTools::basename(to).to_owned();
+            let to = self.get_ref(PathTools::dirname(to));
+
+            self.clock.apply(self.clock.inc(self.actor.clone()));
+
+            self.apply(vec![Op {
+                marker: Marker {
+                    actor: self.actor.clone(),
+                    clock: self.clock.clone(),
+                    time: self.time,
+                },
+                parent_ref: to,
+                child_key: TrieKey(filename),
+                child_ref: from,
+                child_content: content,
+            }])
+        }
+
+        fn write(&mut self, to: &str, data: &str) {
+            let filename = PathTools::basename(to).to_owned();
+            let to = self.get_ref(PathTools::dirname(to));
+
+            self.clock.apply(self.clock.inc(self.actor.clone()));
+
+            self.apply(vec![Op {
+                marker: Marker {
+                    actor: self.actor.clone(),
+                    clock: self.clock.clone(),
+                    time: self.time,
+                },
+                parent_ref: to,
+                child_key: TrieKey(filename),
+                child_ref: TrieRef::new(),
+                child_content: data.to_owned(),
+            }])
+        }
+
+        fn mkdir(&mut self, to: &str) {
+            self.write(to, "")
+        }
+
+        fn date(&mut self, c: u64) {
+            self.time = c
+        }
+    }
+
+    fn check(ends: &[&End], expect: &str) {
+        for a in ends.iter() {
+            assert!(ends
+                .iter()
+                .all(|b| a.trie.to_string() == b.trie.to_string()));
+        }
+        for e in ends {
+            assert_eq!(e.trie.to_string(), expect);
+        }
+    }
+
+    macro_rules! testing {
+        (show { $e:ident }) => {
+            println!("{}", $e.trie.to_string());
+        };
+        (check $( $x:ident )* { $e:expr }) => {
+            check(&[$(
+                &$x,
+            )*], indoc! {$e})
+        };
+        (sync { $from:ident <=> $to:ident }) => {
+            $from.sync_with(&mut $to);
+        };
+        (have { $($end:ident($endid:literal))* }) => {
+            $(let mut $end = End::new($endid);)*
+        };
+        (clone { $from:ident => $to:ident($toid:literal) }) => {
+            let mut $to = $from.clone_as($toid);
+        };
+        (on $end:tt { $($ac:tt $($arg:expr)* );*; }) => {
+            $(
+                $end.$ac($($arg,)*);
+            )*
+        };
+        ($($($cmd:ident)* { $($tail:tt)* })+) => {
+            {
+                $(testing!( $($cmd )* {  $($tail)* } );)*
+            }
+        };
+    }
 
     #[test]
-    fn test() {
-        let mut t = Trie::<u64, u64, String>::default();
-        let mut w = t.write();
-        fn mov(
-            w: &mut TrieUpdater<'_, u64, u64, String>,
-            clock: u64,
-            p: u128,
-            k: &str,
-            c: u128,
-            data: &str,
-        ) {
-            w.apply(vec![Op {
-                clock,
-                actor: 1,
-                parent_ref: TrieRef(p),
-                child_key: TrieKey(k.to_string()),
-                child_ref: TrieRef(c),
-                child_content: data.to_string(),
-            }])
-            .unwrap();
-        }
-        mov(&mut w, 1, 0, "abc", 1, "test folder");
-        mov(&mut w, 3, 1, "hello", 2, "test file");
-        mov(&mut w, 2, 1, "hello", 2, "test file2");
-        mov(&mut w, 4, 0, "abc", 3, "test folder 2");
-        mov(&mut w, 5, 3, "hello2", 4, "test file212");
-        mov(&mut w, 6, 1, "hello3", 4, "test file212");
-        mov(&mut w, 7, 1, "hello3", 4, "test file212");
-        mov(&mut w, 8, 2, "world", 5, "test");
-        mov(&mut w, 9, 0, "world", 2, "aaa");
-        mov(&mut w, 10, 0, "abc", 2, "aaa");
-        mov(&mut w, 11, 1, "cewafewa", 6, "aaaa");
+    fn write_with_rename() {
+        testing!(
+            have { local(1) }
+            on local {
+                mkdir "/hello";
+                write "/hello/file" "world";
+            }
+            clone { local => remote(2) }
+            on remote {
+                rename "/hello" "/dir";
+            }
+            on local {
+                write "/hello/file" "helloworld";
+            }
+            sync { local <=> remote }
+            check local remote {
+                "
+                └ dir/file [helloworld]
+                "
+            }
+        );
+    }
 
-        w.commit().unwrap();
-        dbg!(&t);
+    #[test]
+    fn clock_test() {
+        testing!(
+            have { local(1) remote(2) }
+            on local {
+                date 0;
+                write "/file" "local";
+            }
+            sync { local <=> remote }
+            on remote {
+                date 999;
+                write "/file" "remote";
+            }
+            sync { local <=> remote }
+            on local {
+                date 0;
+                write "/file" "some";
+            }
+            sync { local <=> remote }
+            check local remote {
+                // date does not affect sync if there are no conflicts
+                "
+                └ file [some]
+                "
+            }
+        );
+    }
 
-        println!("{t}");
+    #[test]
+    fn file_conflict_test() {
+        testing!(
+            have { local(1) remote(2) }
+            on local {
+                write "/file" "local";
+            }
+            on remote {
+                write "/file" "remote";
+            }
+            sync { local <=> remote }
+            check local remote {
+                // remote id is larger, keep the remote
+                "
+                └ file [remote]
+                "
+            }
+        );
+
+        testing!(
+            have { local(1) remote(2) }
+            on local {
+                date 2;
+                write "/file" "local";
+            }
+            on remote {
+                date 1;
+                write "/file" "remote";
+            }
+            sync { local <=> remote }
+            check local remote {
+                // local date is larger, keep the local
+                "
+                └ file [local]
+                "
+            }
+        );
+    }
+
+    #[test]
+    fn folder_conflict_test() {
+        testing!(
+            have { local(1) remote(2) }
+            on local {
+                mkdir "/folder1";
+                write "/folder1/foo" "bar";
+            }
+            on remote {
+                mkdir "/folder1";
+                write "/folder1/file" "abc";
+            }
+            sync { local <=> remote }
+            on remote {
+                mkdir "/folder1";
+                write "/folder1/hello" "world";
+            }
+            sync { local <=> remote }
+            check local remote {
+                // no rename, we just merge the conflict folder
+                "
+                └ folder1
+                 ├ file [abc]
+                 ├ foo [bar]
+                 └ hello [world]
+                "
+            }
+        );
+
+        testing!(
+            have { local(1) }
+            on local {
+                mkdir "/folder1";
+                write "/folder1/foo" "bar";
+            }
+            clone { local => remote(2) }
+            on remote {
+                mkdir "/folder2";
+                write "/folder2/hello" "world";
+                rename "/folder2" "/folder3";
+            }
+            on local {
+                rename "/folder1" "/folder3";
+            }
+            sync { local <=> remote }
+            check local remote {
+                // both version of folder3 has content, we can't merge them
+                // remote id is larger, keep the remote
+                "
+                └ folder3/hello [world]
+                "
+            }
+        );
+
+        testing!(
+            have { local(1) }
+            on local {
+                mkdir "/folder1";
+                write "/folder1/foo" "bar";
+            }
+            clone { local => remote(2) }
+            on remote {
+                mkdir "/folder2";
+                rename "/folder2" "/folder3";
+                write "/folder3/hello" "world";
+            }
+            on local {
+                rename "/folder1" "/folder3";
+            }
+            sync { local <=> remote }
+            check local remote {
+                // local version folder3 has content, keep the local
+                // and writes after the rename on the remote will apply to new folder3
+                // its looks like merge
+                "
+                └ folder3
+                 ├ foo [bar]
+                 └ hello [world]
+                "
+            }
+        );
     }
 }

@@ -419,7 +419,9 @@ impl PathTools {
             }
         }
 
-        positions.push(path.len());
+        if path.len() > 1 {
+            positions.push(path.len());
+        }
 
         positions.into_iter().map(|i| &path[0..i])
     }
@@ -670,6 +672,15 @@ mod tests {
 
     #[test]
     fn dive_test() {
+        assert_eq!(vec!["/"], PathTools::dive("/").collect::<Vec<_>>());
+        assert_eq!(
+            vec!["/", "/foo"],
+            PathTools::dive("/foo").collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec!["  /", "  /foo"],
+            PathTools::dive("  /foo").collect::<Vec<_>>()
+        );
         assert_eq!(
             vec!["/", "/foo", "/foo/bar", "/foo/bar/c"],
             PathTools::dive("/foo/bar/c").collect::<Vec<_>>()
