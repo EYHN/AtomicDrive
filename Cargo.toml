@@ -5,5 +5,9 @@ members = [
     "./crates/utils",
     "./crates/vindex",
     "./crates/sync",
-    "./crates/chunk"
+    "./crates/chunk",
+    "./crates/trie"
 ]
+
+[profile.bench]
+debug = true

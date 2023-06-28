@@ -27,12 +27,12 @@ impl<A: Clone + Hash + Default> TrieContent for A {}
 pub trait TrieMarker: PartialOrd + Clone + Hash {}
 impl<A: PartialOrd + Clone + Hash> TrieMarker for A {}
 
-const ROOT: TrieId = TrieId(0);
-const CONFLICT: TrieId = TrieId(1);
+pub const ROOT: TrieId = TrieId(0);
+pub const CONFLICT: TrieId = TrieId(1);
 
 /// Tree node id
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct TrieId(u64);
+pub struct TrieId(pub u64);
 
 impl Display for TrieId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -48,7 +48,7 @@ impl TrieId {
 
 /// The key of the tree
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct TrieKey(String);
+pub struct TrieKey(pub String);
 
 impl Display for TrieKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -58,7 +58,7 @@ impl Display for TrieKey {
 
 /// The reference of the node, which is used to determine the node of the operation during the distributed operation
 #[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
-pub struct TrieRef(u128);
+pub struct TrieRef(pub u128);
 
 impl TrieRef {
     pub fn new() -> Self {
@@ -73,7 +73,7 @@ impl Display for TrieRef {
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq, Hash)]
-pub struct TrieHash([u8; 32]);
+pub struct TrieHash(pub [u8; 32]);
 
 impl Display for TrieHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -89,37 +89,31 @@ impl Display for TrieHash {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-struct TrieNode<C> {
-    parent: TrieId,
-    key: TrieKey,
-    hash: TrieHash,
-    children: HashMap<TrieKey, TrieId>,
-    content: C,
+pub struct TrieNode<C> {
+    pub parent: TrieId,
+    pub key: TrieKey,
+    pub hash: TrieHash,
+    pub children: HashMap<TrieKey, TrieId>,
+    pub content: C,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Op<M: TrieMarker, C: TrieContent> {
-    marker: M,
-    parent_ref: TrieRef,
-    child_key: TrieKey,
-    child_ref: TrieRef,
-    child_content: C,
+    pub marker: M,
+    pub parent_ref: TrieRef,
+    pub child_key: TrieKey,
+    pub child_ref: TrieRef,
+    pub child_content: C,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct LogOp<M: TrieMarker, C: TrieContent> {
-    op: Op<M, C>,
-    undos: Vec<Undo<C>>,
+pub struct LogOp<M: TrieMarker, C: TrieContent> {
+    pub op: Op<M, C>,
+    pub undos: Vec<Undo<C>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum ConflictMode {
-    KeepNew,
-    KeepBefore,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Do<C: TrieContent> {
+pub enum Do<C: TrieContent> {
     Ref(TrieRef, Option<TrieId>),
     Move {
         id: TrieId,
@@ -128,7 +122,7 @@ enum Do<C: TrieContent> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Undo<C: TrieContent> {
+pub enum Undo<C: TrieContent> {
     Ref(TrieRef, Option<TrieId>),
     Move {
         id: TrieId,
@@ -137,7 +131,7 @@ enum Undo<C: TrieContent> {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct Trie<M: TrieMarker, C: TrieContent> {
+pub struct Trie<M: TrieMarker, C: TrieContent> {
     /// id -> node
     tree: HashMap<TrieId, TrieNode<C>>,
     /// ref <-> id index
@@ -154,7 +148,7 @@ impl<M: TrieMarker, C: TrieContent + Display> Display for Trie<M, C> {
         self.itemization(TrieId(0), "", &mut items);
 
         f.write_str(&tree_stringify(
-            items.iter().map(|(path, id, node)| {
+            items.iter().map(|(path, _, node)| {
                 (
                     path.as_ref(),
                     if node.content.to_string().is_empty() {
@@ -230,7 +224,7 @@ impl<M: TrieMarker, C: TrieContent> Trie<M, C> {
         self.ref_id_index.1.get(id)
     }
 
-    fn get(&self, id: &TrieId) -> Option<&TrieNode<C>> {
+    pub fn get(&self, id: &TrieId) -> Option<&TrieNode<C>> {
         self.tree.get(id)
     }
 
@@ -294,7 +288,7 @@ impl<M: TrieMarker, C: TrieContent> Trie<M, C> {
     }
 }
 
-struct TrieUpdater<'a, M: TrieMarker, C: TrieContent> {
+pub struct TrieUpdater<'a, M: TrieMarker, C: TrieContent> {
     target: &'a mut Trie<M, C>,
 }
 
@@ -514,14 +508,16 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
         self.do_op(log.op.clone())
     }
 
-    fn apply(&mut self, ops: Vec<Op<M, C>>) -> Result<&mut Self> {
+    pub fn apply(&mut self, ops: Vec<Op<M, C>>) -> Result<&mut Self> {
         let mut redo_queue = VecDeque::new();
         if let Some(first_op) = ops.first() {
             loop {
                 if let Some(last) = self.target.log.pop_back() {
                     match first_op.marker.partial_cmp(&last.op.marker) {
                         None | Some(Ordering::Equal) => {
-                            panic!("op with timestamp equal to previous op ignored. (not applied).  Every op must have a unique timestamp.");
+                            return Err(Error::InvalidOp(
+                                "The marker of the operation has duplicates. Every op must have a unique timestamp.".to_string(),
+                            ));
                         }
                         Some(Ordering::Less) => {
                             self.undo_op(&last)?;
@@ -543,8 +539,8 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
                     match op.marker.partial_cmp(&redo.op.marker) {
                         None | Some(Ordering::Equal) => {
                             return Err(Error::InvalidOp(
-                                "The marker of the operation has duplicates. Every op must have a unique timestamp.".to_string(),
-                            ));
+                              "The marker of the operation has duplicates. Every op must have a unique timestamp.".to_string(),
+                          ));
                         }
                         Some(Ordering::Less) => {
                             let log_op = self.do_op(op)?;
@@ -565,7 +561,6 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
                 }
             }
         }
-
         for redo in redo_queue {
             self.redo_op(&redo)?;
             self.target.log.push_back(redo);
@@ -664,7 +659,7 @@ mod tests {
                 self.clock
                     .apply(op.marker.clock.dot(op.marker.actor.clone()))
             }
-            self.trie.write().apply(ops).unwrap().commit();
+            self.trie.write().apply(ops).unwrap().commit().unwrap();
         }
 
         fn get_id(&self, path: &str) -> TrieId {
@@ -761,34 +756,34 @@ mod tests {
     }
 
     macro_rules! testing {
-        (show { $e:ident }) => {
-            println!("{}", $e.trie.to_string());
-        };
-        (check $( $x:ident )* { $e:expr }) => {
-            check(&[$(
-                &$x,
-            )*], indoc! {$e})
-        };
-        (sync { $from:ident <=> $to:ident }) => {
-            $from.sync_with(&mut $to);
-        };
-        (have { $($end:ident($endid:literal))* }) => {
-            $(let mut $end = End::new($endid);)*
-        };
-        (clone { $from:ident => $to:ident($toid:literal) }) => {
-            let mut $to = $from.clone_as($toid);
-        };
-        (on $end:tt { $($ac:tt $($arg:expr)* );*; }) => {
-            $(
-                $end.$ac($($arg,)*);
-            )*
-        };
-        ($($($cmd:ident)* { $($tail:tt)* })+) => {
-            {
-                $(testing!( $($cmd )* {  $($tail)* } );)*
-            }
-        };
-    }
+      (show { $e:ident }) => {
+          println!("{}", $e.trie.to_string());
+      };
+      (check $( $x:ident )* { $e:expr }) => {
+          check(&[$(
+              &$x,
+          )*], indoc! {$e})
+      };
+      (sync { $from:ident <=> $to:ident }) => {
+          $from.sync_with(&mut $to);
+      };
+      (have { $($end:ident($end_id:literal))* }) => {
+          $(let mut $end = End::new($end_id);)*
+      };
+      (clone { $from:ident => $to:ident($to_id:literal) }) => {
+          let mut $to = $from.clone_as($to_id);
+      };
+      (on $end:tt { $($ac:tt $($arg:expr)* );*; }) => {
+          $(
+              $end.$ac($($arg,)*);
+          )*
+      };
+      ($($($cmd:ident)* { $($tail:tt)* })+) => {
+          {
+              $(testing!( $($cmd )* {  $($tail)* } );)*
+          }
+      };
+  }
 
     #[test]
     fn write_with_rename() {
