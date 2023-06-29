@@ -1,9 +1,13 @@
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry as HashMapEntry, HashMap, HashSet, LinkedList, VecDeque},
+    collections::{
+        btree_map::Entry as BTreeMapEntry, hash_map::Entry as HashMapEntry, BTreeMap, HashMap,
+        HashSet, LinkedList, VecDeque,
+    },
     fmt::Display,
 };
 
+use sha2::{Digest, Sha256};
 use std::fmt::Debug;
 use thiserror::Error;
 use utils::tree_stringify;
@@ -21,8 +25,21 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub trait TrieContent: Clone + Hash + Default {}
-impl<A: Clone + Hash + Default> TrieContent for A {}
+pub trait TrieContent: Clone + Hash + Default {
+    fn digest(&self, d: &mut impl Digest);
+}
+
+impl TrieContent for String {
+    fn digest(&self, d: &mut impl Digest) {
+        d.update(self.as_bytes())
+    }
+}
+
+impl TrieContent for u64 {
+    fn digest(&self, d: &mut impl Digest) {
+        d.update(&self.to_be_bytes())
+    }
+}
 
 pub trait TrieMarker: PartialOrd + Clone + Hash {}
 impl<A: PartialOrd + Clone + Hash> TrieMarker for A {}
@@ -47,7 +64,7 @@ impl TrieId {
 }
 
 /// The key of the tree
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct TrieKey(pub String);
 
 impl Display for TrieKey {
@@ -75,6 +92,26 @@ impl Display for TrieRef {
 #[derive(Default, Debug, Clone, Eq, PartialEq, Hash)]
 pub struct TrieHash(pub [u8; 32]);
 
+impl TrieHash {
+    pub fn is_expired(&self) -> bool {
+        self.0 == [0u8; 32]
+    }
+
+    pub fn expire(&mut self) {
+        self.0 = [0u8; 32]
+    }
+
+    pub fn expired() -> Self {
+        Self([0u8; 32])
+    }
+}
+
+impl AsRef<[u8]> for TrieHash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 impl Display for TrieHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
@@ -93,7 +130,7 @@ pub struct TrieNode<C> {
     pub parent: TrieId,
     pub key: TrieKey,
     pub hash: TrieHash,
-    pub children: HashMap<TrieKey, TrieId>,
+    pub children: BTreeMap<TrieKey, TrieId>,
     pub content: C,
 }
 
@@ -189,7 +226,7 @@ impl<M: TrieMarker, C: TrieContent> Default for Trie<M, C> {
                     TrieNode {
                         parent: ROOT,
                         key: TrieKey(Default::default()),
-                        hash: Default::default(),
+                        hash: TrieHash::expired(),
                         children: Default::default(),
                         content: Default::default(),
                     },
@@ -199,7 +236,7 @@ impl<M: TrieMarker, C: TrieContent> Default for Trie<M, C> {
                     TrieNode {
                         parent: CONFLICT,
                         key: TrieKey(Default::default()),
-                        hash: Default::default(),
+                        hash: TrieHash::expired(),
                         children: Default::default(),
                         content: Default::default(),
                     },
@@ -260,7 +297,7 @@ impl<M: TrieMarker, C: TrieContent> Trie<M, C> {
                 return true;
             }
             target_id = &node.parent;
-            if target_id == &TrieId(0) {
+            if target_id.0 < 10 {
                 break;
             }
         }
@@ -293,6 +330,85 @@ pub struct TrieUpdater<'a, M: TrieMarker, C: TrieContent> {
 }
 
 impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
+    fn invalidate_hash(&mut self, mut id: TrieId) {
+        loop {
+            if let Some(current) = self.target.tree.get_mut(&id) {
+                if current.hash.is_expired() {
+                    break;
+                } else {
+                    current.hash.expire();
+
+                    if current.parent == id {
+                        break;
+                    } else {
+                        id = current.parent;
+                    }
+                }
+            }
+        }
+    }
+
+    fn calculate_hash(&mut self, root: TrieId) -> Result<()> {
+        let mut search_pass = Vec::from([root]);
+        let mut calculate_pass = Vec::from([]);
+
+        while let Some(current) = search_pass.pop() {
+            let current_node = self
+                .target
+                .get(&current)
+                .ok_or(Error::TreeBroken(format!("node {current} not found")))?;
+
+            for (_, child_id) in current_node.children.iter() {
+                let child = self
+                    .target
+                    .get(&child_id)
+                    .ok_or(Error::TreeBroken(format!("node {child_id} not found")))?;
+
+                if !child.hash.is_expired() {
+                    search_pass.push(*child_id);
+                }
+            }
+
+            calculate_pass.push(current)
+        }
+
+        while let Some(current) = calculate_pass.pop() {
+            let current_node = self
+                .target
+                .tree
+                .get(&current)
+                .ok_or(Error::TreeBroken(format!("node {current} not found")))?;
+
+            let mut hasher = Sha256::new();
+
+            current_node.content.digest(&mut hasher);
+
+            hasher.update(&b"|");
+
+            for (_, child_id) in current_node.children.iter() {
+                let child = self
+                    .target
+                    .get(&child_id)
+                    .ok_or(Error::TreeBroken(format!("node {child_id} not found")))?;
+
+                hasher.update(&child.hash);
+
+                hasher.update(&b"|");
+            }
+
+            let current_node = self
+                .target
+                .tree
+                .get_mut(&current)
+                .ok_or(Error::TreeBroken(format!("node {current} not found")))?;
+
+            let hash = hasher.finalize();
+            current_node.hash = TrieHash(hash[..].try_into().unwrap());
+        }
+
+        Ok(())
+    }
+
     fn do_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Option<TrieId> {
         let old_id = if let Some(id) = self.target.ref_id_index.0.get(&r) {
             if let Some(refs) = self.target.ref_id_index.1.get_mut(&id) {
@@ -338,15 +454,16 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
                     return Err(Error::TreeBroken(format!("bad state")));
                 }
             }
+            self.invalidate_hash(node.parent);
         }
 
         if let Some(to) = to {
             if let Some(n) = self.target.tree.get_mut(&to.0) {
                 match n.children.entry(to.1.to_owned()) {
-                    HashMapEntry::Occupied(_) => {
+                    BTreeMapEntry::Occupied(_) => {
                         return Err(Error::TreeBroken(format!("key {:?} occupied", to.1)));
                     }
-                    HashMapEntry::Vacant(entry) => {
+                    BTreeMapEntry::Vacant(entry) => {
                         entry.insert(id);
                     }
                 }
@@ -354,12 +471,14 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
                 return Err(Error::TreeBroken(format!("node id {:?} not found", to.0)));
             }
 
+            self.invalidate_hash(to.0);
+
             self.target.tree.insert(
                 id,
                 TrieNode {
                     parent: to.0,
                     key: to.1,
-                    hash: Default::default(),
+                    hash: TrieHash::expired(),
                     children: node
                         .as_ref()
                         .map(|n| n.children.clone())
@@ -565,6 +684,8 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
             self.redo_op(&redo)?;
             self.target.log.push_back(redo);
         }
+
+        self.calculate_hash(ROOT)?;
 
         Ok(self)
     }

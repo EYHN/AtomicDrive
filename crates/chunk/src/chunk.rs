@@ -1,6 +1,5 @@
 use std::fmt::{Debug, Display};
 
-use sha2::{Digest, Sha256};
 use utils::bytes_stringify;
 use xxhash_rust::xxh3::xxh3_128;
 
