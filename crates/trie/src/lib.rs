@@ -379,17 +379,7 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
                 .get(&current)
                 .ok_or(Error::TreeBroken(format!("node {current} not found")))?;
 
-            let mut content_hasher = Sha256::new();
-
-            current_node.content.digest(&mut content_hasher);
-
-            let content_hash = content_hasher.finalize();
-
             let mut hasher = Sha256::new();
-
-            hasher.update(&content_hash);
-
-            hasher.update(&b"|");
 
             for (key, child_id) in current_node.children.iter() {
                 let child = self
@@ -409,6 +399,10 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
             }
 
             hasher.update(&current_node.children.len().to_be_bytes());
+
+            hasher.update(&b"|");
+
+            current_node.content.digest(&mut hasher);
 
             let current_node = self
                 .target
