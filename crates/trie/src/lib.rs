@@ -364,7 +364,7 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
                     .get(&child_id)
                     .ok_or(Error::TreeBroken(format!("node {child_id} not found")))?;
 
-                if !child.hash.is_expired() {
+                if child.hash.is_expired() {
                     search_pass.push(*child_id);
                 }
             }
@@ -379,22 +379,36 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
                 .get(&current)
                 .ok_or(Error::TreeBroken(format!("node {current} not found")))?;
 
+            let mut content_hasher = Sha256::new();
+
+            current_node.content.digest(&mut content_hasher);
+
+            let content_hash = content_hasher.finalize();
+
             let mut hasher = Sha256::new();
 
-            current_node.content.digest(&mut hasher);
+            hasher.update(&content_hash);
 
             hasher.update(&b"|");
 
-            for (_, child_id) in current_node.children.iter() {
+            for (key, child_id) in current_node.children.iter() {
                 let child = self
                     .target
                     .get(&child_id)
                     .ok_or(Error::TreeBroken(format!("node {child_id} not found")))?;
 
+                hasher.update(&key.0.as_bytes());
+
+                hasher.update(&key.0.len().to_be_bytes());
+
+                hasher.update(&b"|");
+
                 hasher.update(&child.hash);
 
                 hasher.update(&b"|");
             }
+
+            hasher.update(&current_node.children.len().to_be_bytes());
 
             let current_node = self
                 .target
@@ -880,6 +894,9 @@ mod tests {
       (show { $e:ident }) => {
           println!("{}", $e.trie.to_string());
       };
+      (dbg { $e:expr }) => {
+        println!("{:?}", $e);
+      };
       (check $( $x:ident )* { $e:expr }) => {
           check(&[$(
               &$x,
@@ -921,6 +938,7 @@ mod tests {
             on local {
                 write "/hello/file" "helloworld";
             }
+            dbg { local }
             sync { local <=> remote }
             check local remote {
                 "
