@@ -1,14 +1,6 @@
 pub mod backend;
 
-use std::{
-    borrow::Borrow,
-    cmp::Ordering,
-    collections::{
-        btree_map::Entry as BTreeMapEntry, hash_map::Entry as HashMapEntry, HashSet, VecDeque,
-    },
-    fmt::Display,
-    marker::PhantomData,
-};
+use std::{borrow::Borrow, cmp::Ordering, fmt::Display, marker::PhantomData};
 
 use backend::{TrieBackend, TrieBackendWriter};
 use sha2::{Digest, Sha256};
@@ -363,7 +355,7 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
     }
 
     fn do_op(&mut self, op: Op<M, C>) -> Result<LogOp<M, C>> {
-        let mut dos: Vec<Do<C>> = Default::default();
+        let mut dos: Vec<Do<C>> = Vec::with_capacity(3);
         let child_id = if let Some(child_id) = self.writer.get_id(op.child_ref.to_owned()) {
             child_id.to_owned()
         } else {
@@ -456,16 +448,13 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
             }
         }
 
-        let mut undos: VecDeque<_> = VecDeque::new();
+        let mut undos = Vec::with_capacity(dos.len());
 
         for d in dos {
-            undos.push_front(self.exec_do(d)?)
+            undos.push(self.exec_do(d)?)
         }
 
-        Ok(LogOp {
-            op,
-            undos: undos.into_iter().collect(),
-        })
+        Ok(LogOp { op, undos })
     }
 
     fn exec_do(&mut self, d: Do<C>) -> Result<Undo<C>> {
@@ -493,7 +482,7 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
     }
 
     fn undo_op(&mut self, log: &LogOp<M, C>) -> Result<()> {
-        for undo in log.undos.iter().cloned() {
+        for undo in log.undos.iter().rev().cloned() {
             self.exec_undo(undo)?
         }
 
@@ -520,7 +509,7 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
                             redo_queue.push(last)
                         }
                         Some(Ordering::Greater) => {
-                            self.writer.push_log(last);
+                            self.writer.push_log(last)?;
                             break;
                         }
                     }
@@ -540,26 +529,26 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
                         }
                         Some(Ordering::Less) => {
                             let log_op = self.do_op(op)?;
-                            self.writer.push_log(log_op);
+                            self.writer.push_log(log_op)?;
                             redo_queue.push(redo);
                             break;
                         }
                         Some(Ordering::Greater) => {
                             let redo_log_op = self.redo_op(&redo)?;
-                            self.writer.push_log(redo_log_op);
+                            self.writer.push_log(redo_log_op)?;
                             break;
                         }
                     }
                 } else {
                     let log_op = self.do_op(op)?;
-                    self.writer.push_log(log_op);
+                    self.writer.push_log(log_op)?;
                     break;
                 }
             }
         }
         for redo in redo_queue.into_iter().rev() {
             self.redo_op(&redo)?;
-            self.writer.push_log(redo);
+            self.writer.push_log(redo)?;
         }
 
         self.calculate_hash(ROOT)?;
@@ -573,398 +562,4 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{borrow::Borrow, collections::VecDeque};
-
-    use crdts::{CmRDT, VClock};
-    use utils::PathTools;
-
-    use indoc::indoc;
-
-    use crate::{
-        backend::{memory::TrieMemoryBackend, TrieBackend},
-        ROOT,
-    };
-
-    use super::{Op, Trie, TrieId, TrieKey, TrieRef};
-
-    #[derive(Debug, Hash, Clone, PartialEq, Eq)]
-    struct Marker {
-        actor: u64,
-        clock: VClock<u64>,
-        time: u64,
-    }
-
-    impl Ord for Marker {
-        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-            match self.clock.partial_cmp(&other.clock) {
-                Some(std::cmp::Ordering::Equal) | None => match self.time.cmp(&other.time) {
-                    std::cmp::Ordering::Equal => self.actor.cmp(&other.actor),
-                    ord => ord,
-                },
-                Some(ord) => ord,
-            }
-        }
-    }
-
-    impl PartialOrd for Marker {
-        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct End {
-        actor: u64,
-        clock: VClock<u64>,
-        time: u64,
-        trie: Trie<Marker, String, TrieMemoryBackend<Marker, String>>,
-    }
-
-    impl End {
-        fn new(a: u64) -> Self {
-            return End {
-                actor: a.to_owned(),
-                clock: Default::default(),
-                time: 0,
-                trie: Trie::new(TrieMemoryBackend::default()),
-            };
-        }
-
-        fn clone_as(&self, a: u64) -> Self {
-            let mut new = self.clone();
-            new.actor = a;
-            new
-        }
-
-        fn ops_after(&self, after: &VClock<u64>) -> Vec<Op<Marker, String>> {
-            let mut result = VecDeque::new();
-            for log in self.trie.backend.iter_log() {
-                let log_dot = log.op.marker.clock.dot(log.op.marker.actor.clone());
-                if log_dot > after.dot(log_dot.actor.clone()) {
-                    result.push_front(log.op.clone())
-                }
-            }
-
-            return result.into_iter().collect();
-        }
-
-        fn sync_with(&mut self, other: &mut Self) {
-            let other_ops = other.ops_after(&self.clock);
-            self.apply(other_ops);
-
-            let self_ops = self.ops_after(&other.clock);
-            other.apply(self_ops);
-        }
-
-        fn apply(&mut self, ops: Vec<Op<Marker, String>>) {
-            for op in ops.iter() {
-                self.clock
-                    .apply(op.marker.clock.dot(op.marker.actor.clone()))
-            }
-            self.trie
-                .write()
-                .unwrap()
-                .apply(ops)
-                .unwrap()
-                .commit()
-                .unwrap();
-        }
-
-        fn get_id(&self, path: &str) -> TrieId {
-            let mut id = TrieId(0);
-            if path != "/" {
-                for part in path.split('/').skip(1) {
-                    id = self.trie.get_child(id, TrieKey(part.to_string())).unwrap()
-                }
-            }
-
-            id
-        }
-
-        fn get_ref(&self, path: &str) -> TrieRef {
-            let id = self.get_id(path);
-            self.trie
-                .get_refs(id)
-                .unwrap()
-                .next()
-                .unwrap()
-                .borrow()
-                .to_owned()
-        }
-
-        fn get_content(&self, path: &str) -> String {
-            let id = self.get_id(path);
-            self.trie.get(id).unwrap().borrow().content.to_owned()
-        }
-
-        fn rename(&mut self, from: &str, to: &str) {
-            let content = self.get_content(from);
-            let from = self.get_ref(from);
-            let filename = PathTools::basename(to).to_owned();
-            let to = self.get_ref(PathTools::dirname(to));
-
-            self.clock.apply(self.clock.inc(self.actor.clone()));
-
-            self.apply(vec![Op {
-                marker: Marker {
-                    actor: self.actor.clone(),
-                    clock: self.clock.clone(),
-                    time: self.time,
-                },
-                parent_ref: to,
-                child_key: TrieKey(filename),
-                child_ref: from,
-                child_content: content,
-            }])
-        }
-
-        fn write(&mut self, to: &str, data: &str) {
-            let filename = PathTools::basename(to).to_owned();
-            let to = self.get_ref(PathTools::dirname(to));
-
-            self.clock.apply(self.clock.inc(self.actor.clone()));
-
-            self.apply(vec![Op {
-                marker: Marker {
-                    actor: self.actor.clone(),
-                    clock: self.clock.clone(),
-                    time: self.time,
-                },
-                parent_ref: to,
-                child_key: TrieKey(filename),
-                child_ref: TrieRef::new(),
-                child_content: data.to_owned(),
-            }])
-        }
-
-        fn mkdir(&mut self, to: &str) {
-            self.write(to, "")
-        }
-
-        fn date(&mut self, c: u64) {
-            self.time = c
-        }
-    }
-
-    fn check(ends: &[&End], expect: &str) {
-        for a in ends.iter() {
-            for b in ends.iter() {
-                assert_eq!(a.trie.to_string(), b.trie.to_string());
-                assert_eq!(
-                    a.trie.get(ROOT).unwrap().borrow().hash,
-                    b.trie.get(ROOT).unwrap().borrow().hash
-                );
-            }
-        }
-        for e in ends {
-            assert_eq!(e.trie.to_string(), expect);
-        }
-    }
-
-    macro_rules! testing {
-      (show { $e:ident }) => {
-          println!("{}", $e.trie.to_string());
-      };
-      (exec { $($e:expr;)+ }) => {
-        $($e;)*
-      };
-      (check $( $x:ident )* { $e:expr }) => {
-          check(&[$(
-              &$x,
-          )*], indoc! {$e})
-      };
-      (sync { $from:ident <=> $to:ident }) => {
-          $from.sync_with(&mut $to);
-      };
-      (have { $($end:ident($end_id:literal))* }) => {
-          $(let mut $end = End::new($end_id);)*
-      };
-      (clone { $from:ident => $to:ident($to_id:literal) }) => {
-          let mut $to = $from.clone_as($to_id);
-      };
-      (on $end:tt { $($ac:tt $($arg:expr)* );*; }) => {
-          $(
-              $end.$ac($($arg,)*);
-          )*
-      };
-      ($($cmd1:ident)* { $($tail1:tt)* } $($($cmd:ident)* { $($tail:tt)* })+) => {
-        testing!( $($cmd1 )* {  $($tail1)* } );
-        $(testing!( $($cmd )* {  $($tail)* } );)*
-      };
-  }
-
-    #[test]
-    fn write_with_rename() {
-        testing!(
-            have { local(1) }
-            on local {
-                mkdir "/hello";
-                write "/hello/file" "world";
-            }
-            clone { local => remote(2) }
-            on remote {
-                rename "/hello" "/dir";
-            }
-            on local {
-                write "/hello/file" "helloworld";
-            }
-            sync { local <=> remote }
-            check local remote {
-                "
-                └ dir/file [helloworld]
-                "
-            }
-        );
-    }
-
-    #[test]
-    fn clock_test() {
-        testing!(
-            have { local(1) remote(2) }
-            on local {
-                date 0;
-                write "/file" "local";
-            }
-            sync { local <=> remote }
-            on remote {
-                date 999;
-                write "/file" "remote";
-            }
-            sync { local <=> remote }
-            on local {
-                date 0;
-                write "/file" "some";
-            }
-            sync { local <=> remote }
-            check local remote {
-                // date does not affect sync if there are no conflicts
-                "
-                └ file [some]
-                "
-            }
-        );
-    }
-
-    #[test]
-    fn file_conflict_test() {
-        testing!(
-            have { local(1) remote(2) }
-            on local {
-                write "/file" "local";
-            }
-            on remote {
-                write "/file" "remote";
-            }
-            sync { local <=> remote }
-            check local remote {
-                // remote id is larger, keep the remote
-                "
-                └ file [remote]
-                "
-            }
-        );
-
-        testing!(
-            have { local(1) remote(2) }
-            on local {
-                date 2;
-                write "/file" "local";
-            }
-            on remote {
-                date 1;
-                write "/file" "remote";
-            }
-            sync { local <=> remote }
-            check local remote {
-                // local date is larger, keep the local
-                "
-                └ file [local]
-                "
-            }
-        );
-    }
-
-    #[test]
-    fn folder_conflict_test() {
-        testing!(
-            have { local(1) remote(2) }
-            on local {
-                mkdir "/folder1";
-                write "/folder1/foo" "bar";
-            }
-            on remote {
-                mkdir "/folder1";
-                write "/folder1/file" "abc";
-            }
-            sync { local <=> remote }
-            on remote {
-                mkdir "/folder1";
-                write "/folder1/hello" "world";
-            }
-            sync { local <=> remote }
-            check local remote {
-                // no rename, we just merge the conflict folder
-                "
-                └ folder1
-                 ├ file [abc]
-                 ├ foo [bar]
-                 └ hello [world]
-                "
-            }
-        );
-
-        testing!(
-            have { local(1) }
-            on local {
-                mkdir "/folder1";
-                write "/folder1/foo" "bar";
-            }
-            clone { local => remote(2) }
-            on remote {
-                mkdir "/folder2";
-                write "/folder2/hello" "world";
-                rename "/folder2" "/folder3";
-            }
-            on local {
-                rename "/folder1" "/folder3";
-            }
-            sync { local <=> remote }
-            check local remote {
-                // both version of folder3 has content, we can't merge them
-                // remote id is larger, keep the remote
-                "
-                └ folder3/hello [world]
-                "
-            }
-        );
-
-        testing!(
-            have { local(1) }
-            on local {
-                mkdir "/folder1";
-                write "/folder1/foo" "bar";
-            }
-            clone { local => remote(2) }
-            on remote {
-                mkdir "/folder2";
-                rename "/folder2" "/folder3";
-                write "/folder3/hello" "world";
-            }
-            on local {
-                rename "/folder1" "/folder3";
-            }
-            sync { local <=> remote }
-            check local remote {
-                // local version folder3 has content, keep the local
-                // and writes after the rename on the remote will apply to new folder3
-                // its looks like merge
-                "
-                └ folder3
-                 ├ foo [bar]
-                 └ hello [world]
-                "
-            }
-        );
-    }
-}
+mod tests;
