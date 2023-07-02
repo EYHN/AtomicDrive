@@ -1,6 +1,5 @@
 use std::collections::{
     btree_map::Entry as BTreeMapEntry, hash_map::Entry as HashMapEntry, BTreeMap, HashMap, HashSet,
-    LinkedList,
 };
 
 use crate::{
@@ -21,7 +20,7 @@ pub struct TrieMemoryBackend<M: TrieMarker, C: TrieContent> {
 
     auto_increment_id: TrieId,
 
-    log: LinkedList<LogOp<M, C>>,
+    log: Vec<LogOp<M, C>>,
 }
 
 impl<M: TrieMarker, C: TrieContent> Default for TrieMemoryBackend<M, C> {
@@ -49,18 +48,30 @@ impl<M: TrieMarker, C: TrieContent> Default for TrieMemoryBackend<M, C> {
             ]),
             children: HashMap::from([(ROOT, BTreeMap::default()), (CONFLICT, BTreeMap::default())]),
             ref_id_index: (
-                HashMap::from([(TrieRef(0), ROOT)]),
-                HashMap::from([(ROOT, HashSet::from([TrieRef(0)]))]),
+                HashMap::from([(TrieRef::from(0), ROOT)]),
+                HashMap::from([(ROOT, HashSet::from([TrieRef::from(0)]))]),
             ),
-            auto_increment_id: TrieId(10),
-            log: LinkedList::new(),
+            auto_increment_id: TrieId::from(10),
+            log: Vec::new(),
         }
     }
 }
 
+pub struct TrieMemoryBackendChildrenIter<'a> {
+    iter: Option<std::collections::btree_map::Iter<'a, TrieKey, TrieId>>,
+}
+
+impl<'a> Iterator for TrieMemoryBackendChildrenIter<'a> {
+    type Item = Result<(&'a TrieKey, &'a TrieId)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.as_mut().and_then(|i| i.next().map(|i| Ok(i)))
+    }
+}
+
 impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackend<M, C> {
-    fn get_id(&self, r: TrieRef) -> Option<TrieId> {
-        self.ref_id_index.0.get(&r).cloned()
+    fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
+        Ok(self.ref_id_index.0.get(&r).cloned())
     }
 
     type GetRefsRef<'a> = &'a TrieRef
@@ -71,16 +82,16 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackend<M, C
     where
         Self: 'a;
 
-    fn get_refs(&self, id: TrieId) -> Option<Self::GetRefs<'_>> {
-        self.ref_id_index.1.get(&id).map(|s| s.iter())
+    fn get_refs(&self, id: TrieId) -> Result<Option<Self::GetRefs<'_>>> {
+        Ok(self.ref_id_index.1.get(&id).map(|s| s.iter()))
     }
 
     type Get<'a> = &'a TrieNode<C>
     where
         Self: 'a;
 
-    fn get(&self, id: TrieId) -> Option<Self::Get<'_>> {
-        self.tree.get(&id)
+    fn get(&self, id: TrieId) -> Result<Option<Self::Get<'_>>> {
+        Ok(self.tree.get(&id))
     }
 
     type GetChildrenKey<'a> = &'a TrieKey
@@ -91,21 +102,23 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackend<M, C
     where
         Self: 'a;
 
-    type GetChildren<'a> = std::collections::btree_map::Iter<'a, TrieKey, TrieId>
+    type GetChildren<'a> = TrieMemoryBackendChildrenIter<'a>
     where Self: 'a;
 
-    fn get_children(&self, id: TrieId) -> Option<Self::GetChildren<'_>> {
-        self.children.get(&id).map(|s| s.iter())
+    fn get_children(&self, id: TrieId) -> Result<Self::GetChildren<'_>> {
+        Ok(TrieMemoryBackendChildrenIter {
+            iter: self.children.get(&id).map(|s| s.iter()),
+        })
     }
 
-    fn get_child(&self, id: TrieId, key: TrieKey) -> Option<TrieId> {
-        self.children.get(&id).and_then(|m| m.get(&key)).cloned()
+    fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
+        Ok(self.children.get(&id).and_then(|m| m.get(&key)).cloned())
     }
 
     type IterLogItem<'a> = &'a LogOp<M, C>
     where
         Self: 'a;
-    type IterLog<'a> = std::iter::Rev<std::collections::linked_list::Iter<'a, LogOp<M, C>>>
+    type IterLog<'a> = std::iter::Rev<std::slice::Iter<'a, LogOp<M, C>>>
     where
         Self: 'a;
     fn iter_log(&self) -> Self::IterLog<'_> {
@@ -125,7 +138,7 @@ pub struct TrieMemoryBackendWriter<'a, M: TrieMarker, C: TrieContent> {
 }
 
 impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackendWriter<'_, M, C> {
-    fn get_id(&self, r: TrieRef) -> Option<TrieId> {
+    fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
         self.trie.get_id(r)
     }
 
@@ -137,7 +150,7 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackendWrite
     where
         Self: 'a;
 
-    fn get_refs(&self, id: TrieId) -> Option<Self::GetRefs<'_>> {
+    fn get_refs(&self, id: TrieId) -> Result<Option<Self::GetRefs<'_>>> {
         self.trie.get_refs(id)
     }
 
@@ -145,7 +158,7 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackendWrite
     where
         Self: 'a;
 
-    fn get(&self, id: TrieId) -> Option<Self::Get<'_>> {
+    fn get(&self, id: TrieId) -> Result<Option<Self::Get<'_>>> {
         self.trie.get(id)
     }
 
@@ -157,21 +170,21 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackendWrite
     where
         Self: 'a;
 
-    type GetChildren<'a> = std::collections::btree_map::Iter<'a, TrieKey, TrieId>
-    where Self: 'a;
+    type GetChildren<'a> = TrieMemoryBackendChildrenIter<'a>
+        where Self: 'a;
 
-    fn get_children(&self, id: TrieId) -> Option<Self::GetChildren<'_>> {
+    fn get_children(&self, id: TrieId) -> Result<Self::GetChildren<'_>> {
         self.trie.get_children(id)
     }
 
-    fn get_child(&self, id: TrieId, key: TrieKey) -> Option<TrieId> {
+    fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
         self.trie.get_child(id, key)
     }
 
     type IterLogItem<'a> = &'a LogOp<M, C>
     where
         Self: 'a;
-    type IterLog<'a> = std::iter::Rev<std::collections::linked_list::Iter<'a, LogOp<M, C>>>
+    type IterLog<'a> = std::iter::Rev<std::slice::Iter<'a, LogOp<M, C>>>
     where
         Self: 'a;
     fn iter_log(&self) -> Self::IterLog<'_> {
@@ -225,9 +238,9 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
         Ok(old_id)
     }
 
-    fn create_id(&mut self) -> TrieId {
+    fn create_id(&mut self) -> Result<TrieId> {
         self.trie.auto_increment_id = self.trie.auto_increment_id.inc();
-        self.trie.auto_increment_id
+        Ok(self.trie.auto_increment_id)
     }
 
     fn set_tree_node(
@@ -278,10 +291,10 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
     }
 
     fn pop_log(&mut self) -> Result<Option<LogOp<M, C>>> {
-        Ok(self.trie.log.pop_back())
+        Ok(self.trie.log.pop())
     }
 
     fn push_log(&mut self, log: LogOp<M, C>) -> Result<()> {
-        Ok(self.trie.log.push_back(log))
+        Ok(self.trie.log.push(log))
     }
 }

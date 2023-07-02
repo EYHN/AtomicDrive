@@ -17,17 +17,35 @@ pub enum Error {
     TreeBroken(String),
     #[error("Invalid Operation, {0}")]
     InvalidOp(String),
+    #[error("Decode error, {0}")]
+    DecodeError(String),
+    #[error("rocksdb error")]
+    RocksdbError(#[from] rocksdb::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub trait TrieContent: Clone + Hash + Default {
     fn digest(&self, d: &mut impl Digest);
+
+    fn write_to_bytes(&self, bytes: Vec<u8>) -> Vec<u8>;
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self>;
 }
 
 impl TrieContent for String {
     fn digest(&self, d: &mut impl Digest) {
         d.update(self.as_bytes())
+    }
+
+    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes.extend_from_slice(self.as_bytes());
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_utf8(bytes.to_vec())
+            .map_err(|_| Error::DecodeError(format!("Failed to decode content: {bytes:?}")))
     }
 }
 
@@ -35,33 +53,82 @@ impl TrieContent for u64 {
     fn digest(&self, d: &mut impl Digest) {
         d.update(&self.to_be_bytes())
     }
+
+    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes.extend_from_slice(&self.to_be_bytes());
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(Self::from_be_bytes(bytes.try_into().map_err(|_| {
+            Error::DecodeError(format!("Failed to decode content: {bytes:?}"))
+        })?))
+    }
 }
 
 pub trait TrieMarker: PartialOrd + Clone + Hash {}
 impl<A: PartialOrd + Clone + Hash> TrieMarker for A {}
 
-pub const ROOT: TrieId = TrieId(0);
-pub const CONFLICT: TrieId = TrieId(1);
+pub const ROOT: TrieId = TrieId(0u64.to_be_bytes());
+pub const CONFLICT: TrieId = TrieId(1u64.to_be_bytes());
 
 /// Tree node id
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct TrieId(pub u64);
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+pub struct TrieId(pub [u8; 8]);
 
 impl Display for TrieId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.0, f)
+        Display::fmt(&u64::from_be_bytes(self.0), f)
     }
 }
 
 impl TrieId {
     pub fn inc(&self) -> Self {
-        TrieId(self.0 + 1)
+        TrieId((u64::from_be_bytes(self.0) + 1).to_be_bytes())
+    }
+
+    pub fn id(&self) -> u64 {
+        u64::from_be_bytes(self.0)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(Self::from(u64::from_be_bytes(bytes.try_into().map_err(
+            |_| Error::DecodeError(format!("Failed to decode id: {bytes:?}")),
+        )?)))
+    }
+}
+
+impl From<u64> for TrieId {
+    fn from(value: u64) -> Self {
+        Self(value.to_be_bytes())
     }
 }
 
 /// The key of the tree
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct TrieKey(pub String);
+
+impl TrieKey {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0.as_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(Self::from(String::from_utf8(bytes.to_vec()).map_err(
+            |_| Error::DecodeError(format!("Failed to decode key: {bytes:?}")),
+        )?))
+    }
+}
+
+impl From<String> for TrieKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
 
 impl Display for TrieKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -70,18 +137,36 @@ impl Display for TrieKey {
 }
 
 /// The reference of the node, which is used to determine the node of the operation during the distributed operation
-#[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
-pub struct TrieRef(pub u128);
+#[derive(Debug, Default, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+pub struct TrieRef(pub [u8; 16]);
 
 impl TrieRef {
     pub fn new() -> Self {
-        TrieRef(Uuid::new_v4().to_u128_le())
+        TrieRef(Uuid::new_v4().to_u128_le().to_be_bytes())
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(Self::from(u128::from_be_bytes(bytes.try_into().map_err(
+            |_| Error::DecodeError(format!("Failed to decode ref: {bytes:?}")),
+        )?)))
+    }
+}
+
+impl TrieRef {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<u128> for TrieRef {
+    fn from(value: u128) -> Self {
+        Self(value.to_be_bytes())
     }
 }
 
 impl Display for TrieRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.0, f)
+        Display::fmt(&Uuid::from_bytes_ref(&self.0), f)
     }
 }
 
@@ -95,6 +180,16 @@ impl TrieHash {
 
     pub fn expired() -> Self {
         Self([0u8; 32])
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(Self(bytes.try_into().map_err(|_| {
+            Error::DecodeError(format!("Failed to decode hash: {bytes:?}"))
+        })?))
     }
 }
 
@@ -118,11 +213,43 @@ impl Display for TrieHash {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct TrieNode<C> {
+pub struct TrieNode<C: TrieContent> {
     pub parent: TrieId,
     pub key: TrieKey,
     pub hash: TrieHash,
     pub content: C,
+}
+
+impl<C: TrieContent> TrieNode<C> {
+    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes.extend_from_slice(self.parent.as_bytes());
+        let key_bytes = self.key.as_bytes();
+        bytes.extend_from_slice(&(key_bytes.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(key_bytes);
+        bytes.extend_from_slice(self.hash.as_bytes());
+        bytes = self.content.write_to_bytes(bytes);
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let error = || Error::DecodeError(format!("Failed to decode content: {bytes:?}"));
+        let parent = TrieId::from_bytes(&bytes[0..8])?;
+
+        let key_lens = u32::from_be_bytes(bytes[8..12].try_into().map_err(|_| error())?) as usize;
+
+        let key = TrieKey::from_bytes(&bytes[12..12 + key_lens])?;
+
+        let hash = TrieHash::from_bytes(&bytes[12 + key_lens..12 + key_lens + 32])?;
+
+        let content = C::from_bytes(&bytes[12 + key_lens + 32..])?;
+
+        Ok(Self {
+            parent,
+            key,
+            hash,
+            content,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +295,7 @@ pub struct Trie<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> {
 impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Display for Trie<M, C, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut items = vec![];
-        self.dbg_itemization(TrieId(0), "", &mut items);
+        self.dbg_itemization(ROOT, "", &mut items);
 
         f.write_str(&tree_stringify(
             items.iter().map(|(path, _, node)| {
@@ -189,7 +316,7 @@ impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Display for 
 impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Debug for Trie<M, C, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut items = vec![];
-        self.dbg_itemization(TrieId(0), "", &mut items);
+        self.dbg_itemization(ROOT, "", &mut items);
 
         f.write_str(&tree_stringify(
             items.iter().map(|(path, id, node)| {
@@ -212,22 +339,26 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> Trie<M, C, B> {
         }
     }
 
-    pub fn get_refs(&self, id: TrieId) -> Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>> {
+    pub fn get_refs(
+        &self,
+        id: TrieId,
+    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
         self.backend.get_refs(id)
     }
 
-    pub fn get(&self, id: TrieId) -> Option<impl Borrow<TrieNode<C>> + '_> {
+    pub fn get(&self, id: TrieId) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
         self.backend.get(id)
     }
 
     pub fn get_children(
         &self,
         id: TrieId,
-    ) -> Option<impl Iterator<Item = (impl Borrow<TrieKey> + '_, impl Borrow<TrieId> + '_)>> {
+    ) -> Result<impl Iterator<Item = Result<(impl Borrow<TrieKey> + '_, impl Borrow<TrieId> + '_)>>>
+    {
         self.backend.get_children(id)
     }
 
-    pub fn get_child(&self, id: TrieId, key: TrieKey) -> Option<TrieId> {
+    pub fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
         self.backend.get_child(id, key)
     }
 
@@ -244,11 +375,12 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> Trie<M, C, B> {
         base: &mut Vec<(String, TrieId, TrieNode<C>)>,
     ) {
         let node = self.backend.get_ensure(root).unwrap();
-        let children = self.backend.get_children_ensure(root).unwrap();
+        let children = self.backend.get_children(root).unwrap();
         let path = format!("{}/{}", prefix, node.borrow().key);
         base.push((path.clone(), root, node.borrow().clone()));
 
-        for (_, id) in children {
+        for child in children {
+            let (_, id) = child.unwrap();
             self.dbg_itemization(*id.borrow(), &path, base)
         }
     }
@@ -286,9 +418,10 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
         let mut calculate_pass = Vec::from([]);
 
         while let Some(current) = search_pass.pop() {
-            let current_node_children = self.writer.get_children_ensure(current)?;
+            let current_node_children = self.writer.get_children(current)?;
 
-            for (_, child_id) in current_node_children {
+            for child in current_node_children {
+                let (_, child_id) = child?;
                 let child = self.writer.get_ensure(*child_id.borrow())?;
 
                 if child.borrow().hash.is_expired() {
@@ -301,13 +434,14 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
 
         while let Some(current) = calculate_pass.pop() {
             let current_node = self.writer.get_ensure(current)?;
-            let current_node_children = self.writer.get_children_ensure(current)?;
+            let current_node_children = self.writer.get_children(current)?;
 
             let mut hasher = Sha256::new();
 
             let mut children_len: u64 = 0;
 
-            for (key, child_id) in current_node_children {
+            for child in current_node_children {
+                let (key, child_id) = child?;
                 let child = self.writer.get_ensure(*child_id.borrow())?;
 
                 hasher.update(&key.borrow().0.as_bytes());
@@ -356,14 +490,14 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
 
     fn do_op(&mut self, op: Op<M, C>) -> Result<LogOp<M, C>> {
         let mut dos: Vec<Do<C>> = Vec::with_capacity(3);
-        let child_id = if let Some(child_id) = self.writer.get_id(op.child_ref.to_owned()) {
+        let child_id = if let Some(child_id) = self.writer.get_id(op.child_ref.to_owned())? {
             child_id.to_owned()
         } else {
-            let new_id = self.writer.create_id();
+            let new_id = self.writer.create_id()?;
             dos.push(Do::Ref(op.child_ref.to_owned(), Some(new_id)));
             new_id
         };
-        let parent_id = if let Some(parent_id) = self.writer.get_id(op.parent_ref.to_owned()) {
+        let parent_id = if let Some(parent_id) = self.writer.get_id(op.parent_ref.to_owned())? {
             parent_id.to_owned()
         } else {
             return Err(Error::TreeBroken(format!(
@@ -374,22 +508,15 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
 
         // ensures no cycles are introduced.
         'c: {
-            if child_id != parent_id && !self.writer.is_ancestor(parent_id, child_id) {
+            if child_id != parent_id && !self.writer.is_ancestor(parent_id, child_id)? {
                 if let Some(conflict_node_id) =
-                    self.writer.get_child(parent_id, op.child_key.to_owned())
+                    self.writer.get_child(parent_id, op.child_key.to_owned())?
                 {
                     if conflict_node_id != child_id {
                         let conflict_node = self.writer.get_ensure(conflict_node_id)?;
-                        let conflict_is_empty = self
-                            .writer
-                            .get_children_ensure(conflict_node_id)?
-                            .next()
-                            .is_none();
-                        let new_is_empty = self
-                            .writer
-                            .get_children(child_id)
-                            .map(|mut n| n.next().is_none())
-                            .unwrap_or(true);
+                        let conflict_is_empty =
+                            self.writer.get_children(conflict_node_id)?.next().is_none();
+                        let new_is_empty = self.writer.get_children(child_id)?.next().is_none();
                         if !conflict_is_empty && new_is_empty {
                             // new is empty, keep before
                             dos.push(Do::Ref(op.child_ref.to_owned(), Some(conflict_node_id)));
@@ -405,14 +532,10 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
                             break 'c;
                         } else {
                             // keep new
-                            let refs = self
-                                .writer
-                                .get_refs(conflict_node_id)
-                                .map(|r| r.map(|r| r.borrow().clone()).collect::<Vec<_>>())
-                                .unwrap_or_default();
-
-                            for r in refs {
-                                dos.push(Do::Ref(r, Some(child_id)));
+                            if let Some(refs) = self.writer.get_refs(conflict_node_id)? {
+                                for r in refs {
+                                    dos.push(Do::Ref(r.borrow().clone(), Some(child_id)));
+                                }
                             }
 
                             dos.push(Do::Move {
@@ -481,16 +604,12 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
         })
     }
 
-    fn undo_op(&mut self, log: &LogOp<M, C>) -> Result<()> {
+    fn undo_op(&mut self, log: LogOp<M, C>) -> Result<Op<M, C>> {
         for undo in log.undos.iter().rev().cloned() {
             self.exec_undo(undo)?
         }
 
-        Ok(())
-    }
-
-    fn redo_op(&mut self, log: &LogOp<M, C>) -> Result<LogOp<M, C>> {
-        self.do_op(log.op.clone())
+        Ok(log.op)
     }
 
     pub fn apply(&mut self, ops: Vec<Op<M, C>>) -> Result<&mut Self> {
@@ -505,8 +624,7 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
                             ));
                         }
                         Some(Ordering::Less) => {
-                            self.undo_op(&last)?;
-                            redo_queue.push(last)
+                            redo_queue.push(self.undo_op(last)?);
                         }
                         Some(Ordering::Greater) => {
                             self.writer.push_log(last)?;
@@ -521,7 +639,7 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
         for op in ops {
             loop {
                 if let Some(redo) = redo_queue.pop() {
-                    match op.marker.partial_cmp(&redo.op.marker) {
+                    match op.marker.partial_cmp(&redo.marker) {
                         None | Some(Ordering::Equal) => {
                             return Err(Error::InvalidOp(
                               "The marker of the operation has duplicates. Every op must have a unique timestamp.".to_string(),
@@ -534,7 +652,7 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
                             break;
                         }
                         Some(Ordering::Greater) => {
-                            let redo_log_op = self.redo_op(&redo)?;
+                            let redo_log_op: LogOp<M, C> = self.do_op(redo)?;
                             self.writer.push_log(redo_log_op)?;
                             break;
                         }
@@ -547,8 +665,8 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
             }
         }
         for redo in redo_queue.into_iter().rev() {
-            self.redo_op(&redo)?;
-            self.writer.push_log(redo)?;
+            let redo_log_op: LogOp<M, C> = self.do_op(redo)?;
+            self.writer.push_log(redo_log_op)?;
         }
 
         self.calculate_hash(ROOT)?;

@@ -1,4 +1,5 @@
 pub mod memory;
+pub mod rocks;
 
 use std::borrow::Borrow;
 
@@ -7,7 +8,7 @@ use crate::{
 };
 
 pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
-    fn get_id(&self, r: TrieRef) -> Option<TrieId>;
+    fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>>;
 
     type GetRefsRef<'a>: Borrow<TrieRef> + 'a
     where
@@ -15,12 +16,12 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
     type GetRefs<'a>: Iterator<Item = Self::GetRefsRef<'a>>
     where
         Self: 'a;
-    fn get_refs(&self, id: TrieId) -> Option<Self::GetRefs<'_>>;
+    fn get_refs(&self, id: TrieId) -> Result<Option<Self::GetRefs<'_>>>;
 
     type Get<'a>: Borrow<TrieNode<C>> + 'a
     where
         Self: 'a;
-    fn get(&self, id: TrieId) -> Option<Self::Get<'_>>;
+    fn get(&self, id: TrieId) -> Result<Option<Self::Get<'_>>>;
 
     type GetChildrenKey<'a>: Borrow<TrieKey> + 'a
     where
@@ -28,12 +29,12 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
     type GetChildrenId<'a>: Borrow<TrieId> + 'a
     where
         Self: 'a;
-    type GetChildren<'a>: Iterator<Item = (Self::GetChildrenKey<'a>, Self::GetChildrenId<'a>)>
+    type GetChildren<'a>: Iterator<Item = Result<(Self::GetChildrenKey<'a>, Self::GetChildrenId<'a>)>>
     where
         Self: 'a;
-    fn get_children(&self, id: TrieId) -> Option<Self::GetChildren<'_>>;
+    fn get_children(&self, id: TrieId) -> Result<Self::GetChildren<'_>>;
 
-    fn get_child(&self, id: TrieId, key: TrieKey) -> Option<TrieId>;
+    fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>>;
 
     type IterLogItem<'a>: Borrow<LogOp<M, C>> + 'a
     where
@@ -44,27 +45,22 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
     fn iter_log(&self) -> Self::IterLog<'_>;
 
     fn get_ensure(&self, id: TrieId) -> Result<Self::Get<'_>> {
-        self.get(id)
+        self.get(id)?
             .ok_or(Error::TreeBroken(format!("Trie id {id} not found")))
     }
 
-    fn get_children_ensure(&self, id: TrieId) -> Result<Self::GetChildren<'_>> {
-        self.get_children(id)
-            .ok_or(Error::TreeBroken(format!("Trie id {id} not found")))
-    }
-
-    fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> bool {
+    fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
         let mut target_id = child_id;
-        while let Some(node) = self.get(target_id) {
+        while let Some(node) = self.get(target_id)? {
             if node.borrow().parent == ancestor_id {
-                return true;
+                return Ok(true);
             }
             target_id = node.borrow().parent;
-            if target_id.0 < 10 {
+            if target_id.id() < 10 {
                 break;
             }
         }
-        false
+        Ok(false)
     }
 
     type Writer<'a>: TrieBackendWriter<'a, M, C>
@@ -78,7 +74,7 @@ pub trait TrieBackendWriter<'a, M: TrieMarker, C: TrieContent>: TrieBackend<M, C
 
     fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>>;
 
-    fn create_id(&mut self) -> TrieId;
+    fn create_id(&mut self) -> Result<TrieId>;
 
     fn set_tree_node(
         &mut self,

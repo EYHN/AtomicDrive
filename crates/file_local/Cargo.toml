@@ -7,7 +7,7 @@ edition = "2021"
 file = { path = "../file" }
 utils = { path = "../utils" }
 notify = { version = "5.1.0", features = ["serde"] }
-rocksdb = { version = "0.20", features = ["lz4"], default-features = false }
+rocksdb = { version = "0.21", features = ["lz4"], default-features = false }
 parking_lot = "0.12.1"
 dunce = "1.0.4"
 memmap2 = "0.6.2"

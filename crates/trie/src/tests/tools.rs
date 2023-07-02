@@ -94,10 +94,14 @@ impl End {
     }
 
     pub fn get_id(&self, path: &str) -> TrieId {
-        let mut id = TrieId(0);
+        let mut id = ROOT;
         if path != "/" {
             for part in path.split('/').skip(1) {
-                id = self.trie.get_child(id, TrieKey(part.to_string())).unwrap()
+                id = self
+                    .trie
+                    .get_child(id, TrieKey(part.to_string()))
+                    .unwrap()
+                    .unwrap()
             }
         }
 
@@ -109,6 +113,7 @@ impl End {
         self.trie
             .get_refs(id)
             .unwrap()
+            .unwrap()
             .next()
             .unwrap()
             .borrow()
@@ -117,7 +122,7 @@ impl End {
 
     pub fn get_content(&self, path: &str) -> String {
         let id = self.get_id(path);
-        self.trie.get(id).unwrap().borrow().content.to_owned()
+        self.trie.get(id).unwrap().unwrap().borrow().content.to_owned()
     }
 
     pub fn rename(&mut self, from: &str, to: &str) {
@@ -174,8 +179,8 @@ pub fn check(ends: &[&End], expect: &str) {
         for b in ends.iter() {
             assert_eq!(a.trie.to_string(), b.trie.to_string());
             assert_eq!(
-                a.trie.get(ROOT).unwrap().borrow().hash,
-                b.trie.get(ROOT).unwrap().borrow().hash
+                a.trie.get(ROOT).unwrap().unwrap().borrow().hash,
+                b.trie.get(ROOT).unwrap().unwrap().borrow().hash
             );
         }
     }

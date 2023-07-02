@@ -12,9 +12,9 @@ fn criterion_benchmark(c: &mut Criterion) {
                         i += 1;
                         Op {
                             marker: i,
-                            parent_ref: TrieRef(0),
+                            parent_ref: TrieRef::from(0),
                             child_key: TrieKey(format!("{}", i)),
-                            child_ref: TrieRef(i.into()),
+                            child_ref: TrieRef::from(i as u128),
                             child_content: i,
                         }
                     })
@@ -39,9 +39,9 @@ fn criterion_benchmark(c: &mut Criterion) {
                         let i = i + u64::MAX - 100;
                         Op {
                             marker: i,
-                            parent_ref: TrieRef(0),
+                            parent_ref: TrieRef::from(0),
                             child_key: TrieKey(format!("{}", i)),
-                            child_ref: TrieRef(i.into()),
+                            child_ref: TrieRef::from(i as u128),
                             child_content: 0,
                         }
                     })
@@ -56,9 +56,9 @@ fn criterion_benchmark(c: &mut Criterion) {
                     i += 1;
                     Op {
                         marker: i,
-                        parent_ref: TrieRef(0),
+                        parent_ref: TrieRef::from(0),
                         child_key: TrieKey(format!("{}", i)),
-                        child_ref: TrieRef(i.into()),
+                        child_ref: TrieRef::from(i as u128),
                         child_content: i,
                     }
                 }]
