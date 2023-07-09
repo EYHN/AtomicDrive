@@ -17,7 +17,7 @@ fn write_with_rename() {
             write "/hello/file" "helloworld";
         }
         sync { local <=> remote }
-        check local remote {
+        check local  {
             "
                 └ dir/file [helloworld]
                 "

@@ -1,13 +1,10 @@
-use std::{
-    collections::{btree_map::Entry as BTreeMapEntry, hash_map::Entry as HashMapEntry, HashSet},
-    marker::PhantomData,
-};
+use std::marker::PhantomData;
 
-use rocksdb::{DBAccess, Transaction, TransactionDB};
+use rocksdb::{DBAccess, OptimisticTransactionDB, Transaction};
 
 use crate::{
     Error, LogOp, Result, TrieContent, TrieHash, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef,
-    CONFLICT, ROOT,
+    TrieSerialize, CONFLICT, ROOT,
 };
 
 use super::{TrieBackend, TrieBackendWriter};
@@ -22,6 +19,7 @@ enum Keys {
     AutoIncrementId,
     LogTotalLength,
     Log(u64),
+    Logs,
 }
 
 impl Keys {
@@ -35,26 +33,29 @@ impl Keys {
             Keys::AutoIncrementId => b"auto_increment_id",
             Keys::LogTotalLength => b"log_total_length",
             Keys::Log(_) => b"l",
+            Keys::Logs => b"l",
         });
         key
     }
 
     fn write_bytes_args(&self, mut key: Vec<u8>) -> Vec<u8> {
         match self {
-            Keys::RefIdIndex(r) => key.extend_from_slice(r.as_bytes()),
-            Keys::NodeInfo(id) => key.extend_from_slice(id.as_bytes()),
+            Keys::RefIdIndex(r) => key = r.write_to_bytes(key),
+            Keys::NodeInfo(id) => key = id.write_to_bytes(key),
             Keys::NodeChild(id, k) => {
-                key.extend_from_slice(id.as_bytes());
-                key.extend_from_slice(k.as_bytes())
+                key = id.write_to_bytes(key);
+                key.push(b':');
+                key = k.write_to_bytes(key)
             }
             Keys::NodeChildren(id) => {
-                key.extend_from_slice(id.as_bytes());
+                key = id.write_to_bytes(key);
                 key.push(b':')
             }
-            Keys::IdRefsIndex(id) => key.extend_from_slice(id.as_bytes()),
+            Keys::IdRefsIndex(id) => key = id.write_to_bytes(key),
             Keys::AutoIncrementId => {}
             Keys::LogTotalLength => {}
             Keys::Log(index) => key.extend_from_slice(&index.to_be_bytes()),
+            Keys::Logs => {}
         }
 
         key
@@ -83,14 +84,14 @@ impl Keys {
 
                 Ok(Self::NodeChild(
                     TrieId::from_bytes(id)?,
-                    TrieKey::from_bytes(key)?,
+                    TrieKey::from_bytes(&key[1..])?,
                 ))
             }
             b"i" => Ok(Self::IdRefsIndex(TrieId::from_bytes(args)?)),
             b"auto_increment_id" => Ok(Self::AutoIncrementId),
             b"log_total_length" => Ok(Self::LogTotalLength),
             b"l" => Ok(Self::Log(u64::from_be_bytes(
-                bytes.try_into().map_err(|_| error())?,
+                args.try_into().map_err(|_| error())?,
             ))),
             _ => Err(error()),
         }
@@ -131,11 +132,23 @@ mod keys_tests {
             Keys::parse(&Keys::IdRefsIndex(TrieId::from(999)).to_bytes()).unwrap(),
             Keys::IdRefsIndex(TrieId::from(999))
         );
+        assert_eq!(
+            Keys::parse(&Keys::AutoIncrementId.to_bytes()).unwrap(),
+            Keys::AutoIncrementId
+        );
+        assert_eq!(
+            Keys::parse(&Keys::LogTotalLength.to_bytes()).unwrap(),
+            Keys::LogTotalLength
+        );
+        assert_eq!(
+            Keys::parse(&Keys::Log(111).to_bytes()).unwrap(),
+            Keys::Log(111)
+        );
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Values<M: TrieMarker, C: TrieContent> {
+enum Values<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> {
     RefIdIndex(TrieId),
     NodeInfo(TrieNode<C>),
     NodeChild(TrieId),
@@ -145,26 +158,31 @@ enum Values<M: TrieMarker, C: TrieContent> {
     Log(LogOp<M, C>),
 }
 
-impl<M: TrieMarker, C: TrieContent> Values<M, C> {
+impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> Values<M, C> {
+    fn value_type(&self) -> &'static str {
+        match self {
+            Values::RefIdIndex(_) => "RefIdIndex",
+            Values::NodeInfo(_) => "NodeInfo",
+            Values::NodeChild(_) => "NodeChild",
+            Values::IdRefsIndex(_) => "IdRefsIndex",
+            Values::AutoIncrementId(_) => "AutoIncrementId",
+            Values::LogTotalLength(_) => "LogTotalLength",
+            Values::Log(_) => "Log",
+        }
+    }
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         match self {
-            Values::RefIdIndex(id) => {
-                bytes.extend_from_slice(id.as_bytes());
-            }
-            Values::NodeInfo(node) => {
-                bytes = node.write_to_bytes(bytes);
-            }
-            Values::NodeChild(id) => {
-                bytes.extend_from_slice(id.as_bytes());
-            }
+            Values::RefIdIndex(id) => bytes = id.write_to_bytes(bytes),
+            Values::NodeInfo(node) => bytes = node.write_to_bytes(bytes),
+            Values::NodeChild(id) => bytes = id.write_to_bytes(bytes),
             Values::IdRefsIndex(refs) => {
                 for r in refs.iter() {
-                    bytes.extend_from_slice(r.as_bytes());
+                    bytes = r.write_to_bytes(bytes);
                 }
             }
             Values::AutoIncrementId(id) => bytes.extend_from_slice(&id.id().to_be_bytes()),
             Values::LogTotalLength(id) => bytes.extend_from_slice(&id.to_be_bytes()),
-            Values::Log(log) => todo!(),
+            Values::Log(log) => bytes = log.write_to_bytes(bytes),
         }
 
         bytes
@@ -197,8 +215,9 @@ impl<M: TrieMarker, C: TrieContent> Values<M, C> {
             Keys::LogTotalLength => {
                 Self::LogTotalLength(u64::from_be_bytes(bytes.try_into().map_err(|_| error())?))
             }
-            Keys::Log(_) => {
-                todo!()
+            Keys::Log(_) => Self::Log(LogOp::<M, C>::from_bytes(bytes)?),
+            Keys::Logs => {
+                panic!("Keys::Logs not have value format")
             }
         })
     }
@@ -206,42 +225,77 @@ impl<M: TrieMarker, C: TrieContent> Values<M, C> {
     fn ref_id_index(self) -> Result<TrieId> {
         match self {
             Values::RefIdIndex(id) => Ok(id),
-            _ => Err(Error::DecodeError("Value type error".to_string())),
+            _ => Err(Error::DecodeError(format!(
+                "Value type error, expected RefIdIndex but {}",
+                self.value_type()
+            ))),
         }
     }
 
     fn node_info(self) -> Result<TrieNode<C>> {
         match self {
             Values::NodeInfo(node) => Ok(node),
-            _ => Err(Error::DecodeError("Value type error".to_string())),
+            _ => Err(Error::DecodeError(format!(
+                "Value type error, expected NodeInfo but {}",
+                self.value_type()
+            ))),
         }
     }
 
     fn node_child(self) -> Result<TrieId> {
         match self {
             Values::NodeChild(id) => Ok(id),
-            _ => Err(Error::DecodeError("Value type error".to_string())),
+            _ => Err(Error::DecodeError(format!(
+                "Value type error, expected NodeChild but {}",
+                self.value_type()
+            ))),
         }
     }
 
     fn id_refs_index(self) -> Result<Vec<TrieRef>> {
         match self {
             Values::IdRefsIndex(refs) => Ok(refs),
-            _ => Err(Error::DecodeError("Value type error".to_string())),
+            _ => Err(Error::DecodeError(format!(
+                "Value type error, expected IdRefsIndex but {}",
+                self.value_type()
+            ))),
         }
     }
 
     fn auto_increment_id(self) -> Result<TrieId> {
         match self {
             Values::AutoIncrementId(id) => Ok(id),
-            _ => Err(Error::DecodeError("Value type error".to_string())),
+            _ => Err(Error::DecodeError(format!(
+                "Value type error, expected AutoIncrementId but {}",
+                self.value_type()
+            ))),
+        }
+    }
+
+    fn log_total_length(self) -> Result<u64> {
+        match self {
+            Values::LogTotalLength(len) => Ok(len),
+            _ => Err(Error::DecodeError(format!(
+                "Value type error, expected LogTotalLength but {}",
+                self.value_type()
+            ))),
+        }
+    }
+
+    fn log(self) -> Result<LogOp<M, C>> {
+        match self {
+            Values::Log(log) => Ok(log),
+            _ => Err(Error::DecodeError(format!(
+                "Value type error, expected Log but {}",
+                self.value_type()
+            ))),
         }
     }
 }
 
 #[cfg(test)]
 mod values_tests {
-    use crate::{TrieHash, TrieId, TrieKey, TrieNode, TrieRef};
+    use crate::{LogOp, Op, TrieHash, TrieId, TrieKey, TrieNode, TrieRef, Undo};
 
     use super::{Keys, Values};
 
@@ -295,29 +349,110 @@ mod values_tests {
             .unwrap(),
             TestValue::IdRefsIndex(vec![TrieRef::from(156), TrieRef::from(8888)])
         );
+
+        assert_eq!(
+            TestValue::parse(
+                &Keys::AutoIncrementId,
+                &TestValue::AutoIncrementId(TrieId::from(555)).to_bytes()
+            )
+            .unwrap(),
+            TestValue::AutoIncrementId(TrieId::from(555))
+        );
+
+        assert_eq!(
+            TestValue::parse(
+                &Keys::LogTotalLength,
+                &TestValue::LogTotalLength(456).to_bytes()
+            )
+            .unwrap(),
+            TestValue::LogTotalLength(456)
+        );
+
+        let test_log = LogOp {
+            op: Op {
+                marker: 122,
+                child_content: 555,
+                child_key: TrieKey("CCC".to_string()),
+                child_ref: TrieRef::from(987),
+                parent_ref: TrieRef::from(597),
+            },
+            undos: Vec::from([
+                Undo::Move {
+                    id: TrieId::from(444),
+                    to: Some((TrieId::from(398), TrieKey("eee".to_string()), 494)),
+                },
+                Undo::Ref(TrieRef::from(375), Some(TrieId::from(222))),
+                Undo::Ref(TrieRef::from(664), None),
+                Undo::Move {
+                    id: TrieId::from(84),
+                    to: None,
+                },
+            ]),
+        };
+
+        assert_eq!(
+            TestValue::parse(
+                &Keys::Log(Default::default()),
+                &TestValue::Log(test_log.clone()).to_bytes()
+            )
+            .unwrap(),
+            TestValue::Log(test_log)
+        );
     }
 }
 
-pub struct TrieRocksBackend<M: TrieMarker, C: TrieContent> {
-    db: TransactionDB,
+pub struct TrieRocksBackend<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> {
+    db: OptimisticTransactionDB,
     m: PhantomData<M>,
     c: PhantomData<C>,
 }
 
-impl<M: TrieMarker, C: TrieContent> TrieRocksBackend<M, C> {
+impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieRocksBackend<M, C> {
     pub fn open_or_create_database(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let mut opts = rocksdb::Options::default();
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(11));
         opts.create_if_missing(true);
-        let mut t_opts = rocksdb::TransactionDBOptions::default();
-        t_opts.set_default_lock_timeout(5000);
 
-        let db = TransactionDB::open(&opts, &t_opts, path)?;
-        todo!();
-        Ok(Self {
+        let db = OptimisticTransactionDB::open(&opts, path)?;
+        let mut this = Self {
             db,
             m: Default::default(),
             c: Default::default(),
-        })
+        };
+
+        let writer = this.write()?;
+        writer.set(
+            Keys::AutoIncrementId,
+            Values::AutoIncrementId(TrieId::from(10)),
+        )?;
+        writer.set(Keys::LogTotalLength, Values::LogTotalLength(0))?;
+        writer.set(
+            Keys::NodeInfo(ROOT),
+            Values::NodeInfo(TrieNode {
+                parent: ROOT,
+                key: TrieKey(Default::default()),
+                hash: TrieHash::expired(),
+                content: Default::default(),
+            }),
+        )?;
+        writer.set(
+            Keys::NodeInfo(CONFLICT),
+            Values::NodeInfo(TrieNode {
+                parent: CONFLICT,
+                key: TrieKey(Default::default()),
+                hash: TrieHash::expired(),
+                content: Default::default(),
+            }),
+        )?;
+        writer.set(Keys::RefIdIndex(TrieRef::from(0)), Values::RefIdIndex(ROOT))?;
+        writer.set(
+            Keys::IdRefsIndex(ROOT),
+            Values::IdRefsIndex(vec![TrieRef::from(0)]),
+        )?;
+
+        writer.commit()?;
+
+        Ok(this)
     }
 
     fn get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
@@ -327,33 +462,95 @@ impl<M: TrieMarker, C: TrieContent> TrieRocksBackend<M, C> {
             Ok(None)
         }
     }
+
+    pub fn duplicate(&self, path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+
+        let db = OptimisticTransactionDB::open(&opts, path)?;
+
+        for kv in self.db.iterator(rocksdb::IteratorMode::Start) {
+            let kv = kv?;
+            db.put(kv.0, kv.1)?;
+        }
+
+        Ok(Self {
+            db,
+            m: Default::default(),
+            c: Default::default(),
+        })
+    }
 }
 
-pub struct TrieRocksBackendChildrenIter<'a, M: TrieMarker, C: TrieContent, D: DBAccess> {
+pub struct TrieRocksBackendChildrenIter<
+    'a,
+    M: TrieMarker + TrieSerialize,
+    C: TrieContent + TrieSerialize,
+    D: DBAccess,
+> {
     iter: rocksdb::DBIteratorWithThreadMode<'a, D>,
+    /// try fix: https://github.com/facebook/rocksdb/issues/2343
+    check_upper_bound: Option<Vec<u8>>,
     c: PhantomData<C>,
     m: PhantomData<M>,
 }
 
-impl<'a, M: TrieMarker, C: TrieContent, D: DBAccess> Iterator
+impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize, D: DBAccess> Iterator
     for TrieRocksBackendChildrenIter<'a, M, C, D>
 {
     type Item = Result<(TrieKey, TrieId)>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().and_then(|i| {
+            i.map_err(|e| Error::from(e))
+                .and_then(|item| {
+                    if let Some(ref check_upper_bound) = self.check_upper_bound {
+                        if &item.0[..] >= &check_upper_bound[..] {
+                            return Ok(None);
+                        }
+                    }
+                    let key = Keys::parse(&item.0)?;
+                    let value = Values::<M, C>::parse(&key, &item.1)?.node_child()?;
+                    let key = key.node_child()?.1;
+
+                    Ok(Some((key, value)))
+                })
+                .transpose()
+        })
+    }
+}
+
+pub struct TrieRocksBackendLogIter<
+    'a,
+    M: TrieMarker + TrieSerialize,
+    C: TrieContent + TrieSerialize,
+    D: DBAccess,
+> {
+    iter: rocksdb::DBIteratorWithThreadMode<'a, D>,
+    c: PhantomData<C>,
+    m: PhantomData<M>,
+}
+
+impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize, D: DBAccess> Iterator
+    for TrieRocksBackendLogIter<'a, M, C, D>
+{
+    type Item = Result<LogOp<M, C>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().map(|i| {
             i.map_err(|e| Error::from(e)).and_then(|item| {
                 let key = Keys::parse(&item.0)?;
-                let value = Values::<M, C>::parse(&key, &item.1)?.node_child()?;
-                let key = key.node_child()?.1;
+                let value = Values::<M, C>::parse(&key, &item.1)?.log()?;
 
-                Ok((key, value))
+                Ok(value)
             })
         })
     }
 }
 
-impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackend<M, C> {
+impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<M, C>
+    for TrieRocksBackend<M, C>
+{
     fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
         self.get(Keys::RefIdIndex(r))?
             .map(|v| v.ref_id_index())
@@ -392,7 +589,7 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackend<M, C>
     where
         Self: 'a;
 
-    type GetChildren<'a> = TrieRocksBackendChildrenIter<'a, M, C, TransactionDB>
+    type GetChildren<'a> = TrieRocksBackendChildrenIter<'a, M, C, OptimisticTransactionDB>
     where Self: 'a;
 
     fn get_children(&self, id: TrieId) -> Result<Self::GetChildren<'_>> {
@@ -401,13 +598,14 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackend<M, C>
         *upper_bound.last_mut().unwrap() += 1;
         let mut read_opt = rocksdb::ReadOptions::default();
         read_opt.set_iterate_upper_bound(upper_bound);
-        let mut iter = self.db.iterator_opt(
+        let iter = self.db.iterator_opt(
             rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
             read_opt,
         );
 
         Ok(TrieRocksBackendChildrenIter {
             iter,
+            check_upper_bound: None,
             c: Default::default(),
             m: Default::default(),
         })
@@ -419,15 +617,28 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackend<M, C>
             .transpose()
     }
 
-    type IterLogItem<'a> = &'a LogOp<M, C>
+    type IterLogItem<'a> = LogOp<M, C>
     where
         Self: 'a;
-    type IterLog<'a> = std::iter::Rev<std::slice::Iter<'a, LogOp<M, C>>>
+    type IterLog<'a> = TrieRocksBackendLogIter<'a, M, C, OptimisticTransactionDB>
     where
         Self: 'a;
-    fn iter_log(&self) -> Self::IterLog<'_> {
-        todo!()
-        // self.log.iter().rev()
+    fn iter_log(&self) -> Result<Self::IterLog<'_>> {
+        let prefix = Keys::Logs.to_bytes();
+        let mut upper_bound = prefix.clone();
+        *upper_bound.last_mut().unwrap() += 1;
+        let mut read_opt = rocksdb::ReadOptions::default();
+        read_opt.set_iterate_upper_bound(upper_bound);
+        let iter = self.db.iterator_opt(
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            read_opt,
+        );
+
+        Ok(TrieRocksBackendLogIter {
+            iter,
+            c: Default::default(),
+            m: Default::default(),
+        })
     }
 
     type Writer<'a> = TrieRocksBackendWriter<'a, M, C>
@@ -443,12 +654,14 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackend<M, C>
 }
 
 pub struct TrieRocksBackendWriter<'db, M: TrieMarker, C: TrieContent> {
-    transaction: rocksdb::Transaction<'db, TransactionDB>,
+    transaction: rocksdb::Transaction<'db, OptimisticTransactionDB>,
     m: PhantomData<M>,
     c: PhantomData<C>,
 }
 
-impl<M: TrieMarker, C: TrieContent> TrieRocksBackendWriter<'_, M, C> {
+impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize>
+    TrieRocksBackendWriter<'_, M, C>
+{
     fn get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
         if let Some(value) = self.transaction.get_pinned(key.to_bytes())? {
             Ok(Some(Values::parse(&key, &value)?))
@@ -461,9 +674,16 @@ impl<M: TrieMarker, C: TrieContent> TrieRocksBackendWriter<'_, M, C> {
         self.transaction.put(&key.to_bytes(), &value.to_bytes())?;
         Ok(())
     }
+
+    fn del(&self, key: Keys) -> Result<()> {
+        self.transaction.delete(&key.to_bytes())?;
+        Ok(())
+    }
 }
 
-impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackendWriter<'_, M, C> {
+impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<M, C>
+    for TrieRocksBackendWriter<'_, M, C>
+{
     fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
         self.get(Keys::RefIdIndex(r))?
             .map(|v| v.ref_id_index())
@@ -502,7 +722,7 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackendWriter
     where
         Self: 'a;
 
-    type GetChildren<'a> = TrieRocksBackendChildrenIter<'a, M, C, Transaction<'a, TransactionDB>>
+    type GetChildren<'a> = TrieRocksBackendChildrenIter<'a, M, C, Transaction<'a, OptimisticTransactionDB>>
     where Self: 'a;
 
     fn get_children(&self, id: TrieId) -> Result<Self::GetChildren<'_>> {
@@ -510,7 +730,7 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackendWriter
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
         let mut read_opt = rocksdb::ReadOptions::default();
-        read_opt.set_iterate_upper_bound(upper_bound);
+        read_opt.set_iterate_upper_bound(upper_bound.clone());
         let iter = self.transaction.iterator_opt(
             rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
             read_opt,
@@ -518,6 +738,7 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackendWriter
 
         Ok(TrieRocksBackendChildrenIter {
             iter,
+            check_upper_bound: Some(upper_bound),
             c: Default::default(),
             m: Default::default(),
         })
@@ -529,15 +750,28 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackendWriter
             .transpose()
     }
 
-    type IterLogItem<'a> = &'a LogOp<M, C>
+    type IterLogItem<'a> = LogOp<M, C>
     where
         Self: 'a;
-    type IterLog<'a> = std::iter::Rev<std::slice::Iter<'a, LogOp<M, C>>>
+    type IterLog<'a> = TrieRocksBackendLogIter<'a, M, C, Transaction<'a, OptimisticTransactionDB>>
     where
         Self: 'a;
-    fn iter_log(&self) -> Self::IterLog<'_> {
-        todo!()
-        // self.log.iter().rev()
+    fn iter_log(&self) -> Result<Self::IterLog<'_>> {
+        let prefix = Keys::Logs.to_bytes();
+        let mut upper_bound = prefix.clone();
+        *upper_bound.last_mut().unwrap() += 1;
+        let mut read_opt = rocksdb::ReadOptions::default();
+        read_opt.set_iterate_upper_bound(upper_bound);
+        let mut iter = self.transaction.iterator_opt(
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            read_opt,
+        );
+
+        Ok(TrieRocksBackendLogIter {
+            iter,
+            c: Default::default(),
+            m: Default::default(),
+        })
     }
 
     type Writer<'a> = TrieRocksBackendWriter<'a, M, C>
@@ -548,15 +782,66 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieRocksBackendWriter
     }
 }
 
-impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
+impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackendWriter<'a, M, C>
     for TrieRocksBackendWriter<'a, M, C>
 {
     fn set_hash(&mut self, id: TrieId, hash: TrieHash) -> Result<()> {
-        todo!()
+        if let Some(mut info) = self
+            .get(Keys::NodeInfo(id))?
+            .map(|v| v.node_info())
+            .transpose()?
+        {
+            info.hash = hash;
+            self.set(Keys::NodeInfo(id), Values::NodeInfo(info))?;
+            Ok(())
+        } else {
+            Err(Error::TreeBroken(format!("id {id} not found")))
+        }
     }
 
     fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>> {
-        todo!()
+        let old_id = if let Some(id) = self
+            .get(Keys::RefIdIndex(r.to_owned()))?
+            .map(|v| v.ref_id_index())
+            .transpose()?
+        {
+            if let Some(mut refs) = self
+                .get(Keys::IdRefsIndex(id))?
+                .map(|v| v.id_refs_index())
+                .transpose()?
+            {
+                if let Some(i) = refs.iter().position(|r| r == r) {
+                    refs.remove(i);
+                }
+                if refs.is_empty() {
+                    self.del(Keys::IdRefsIndex(id))?;
+                } else {
+                    self.set(Keys::IdRefsIndex(id), Values::IdRefsIndex(refs))?;
+                }
+            }
+            self.del(Keys::RefIdIndex(r.to_owned()))?;
+            Some(id)
+        } else {
+            None
+        };
+
+        if let Some(id) = id {
+            self.set(Keys::RefIdIndex(r.to_owned()), Values::RefIdIndex(id))?;
+            if let Some(mut refs) = self
+                .get(Keys::IdRefsIndex(id))?
+                .map(|v| v.id_refs_index())
+                .transpose()?
+            {
+                if refs.iter().all(|item| item != &r) {
+                    refs.push(r.to_owned());
+                    self.set(Keys::IdRefsIndex(id), Values::IdRefsIndex(refs))?;
+                }
+            } else {
+                self.set(Keys::IdRefsIndex(id), Values::IdRefsIndex(vec![r]))?;
+            }
+        }
+
+        Ok(old_id)
     }
 
     fn create_id(&mut self) -> Result<TrieId> {
@@ -576,14 +861,72 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
         id: TrieId,
         to: Option<(TrieId, TrieKey, C)>,
     ) -> Result<Option<(TrieId, TrieKey, C)>> {
-        todo!()
+        let node = self
+            .get(Keys::NodeInfo(id))?
+            .map(|v| v.node_info())
+            .transpose()?;
+
+        if let Some(node) = &node {
+            self.del(Keys::NodeInfo(id))?;
+            self.del(Keys::NodeChild(node.parent, node.key.to_owned()))?;
+        }
+
+        if let Some(to) = to {
+            self.set(
+                Keys::NodeChild(to.0, to.1.to_owned()),
+                Values::NodeChild(id),
+            )?;
+
+            self.set(
+                Keys::NodeInfo(id),
+                Values::NodeInfo(TrieNode {
+                    parent: to.0,
+                    key: to.1,
+                    hash: TrieHash::expired(),
+                    content: to.2,
+                }),
+            )?;
+        }
+
+        Ok(node.map(|n| (n.parent, n.key, n.content)))
     }
 
     fn pop_log(&mut self) -> Result<Option<LogOp<M, C>>> {
-        todo!()
+        let log_len = self
+            .get(Keys::LogTotalLength)?
+            .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?
+            .log_total_length()?;
+
+        if log_len == 0 {
+            return Ok(None);
+        }
+
+        let pop_index = u64::MAX - (log_len - 1);
+        let log = self
+            .get(Keys::Log(pop_index))?
+            .ok_or(Error::TreeBroken("log not found.".to_owned()))?
+            .log()?;
+        self.set(Keys::LogTotalLength, Values::LogTotalLength(log_len - 1))?;
+        self.del(Keys::Log(pop_index))?;
+
+        Ok(Some(log))
     }
 
     fn push_log(&mut self, log: LogOp<M, C>) -> Result<()> {
-        todo!()
+        let log_len = self
+            .get(Keys::LogTotalLength)?
+            .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?
+            .log_total_length()?;
+
+        let push_index = u64::MAX - log_len;
+        self.set(Keys::Log(push_index), Values::Log(log))?;
+        self.set(Keys::LogTotalLength, Values::LogTotalLength(log_len + 1))?;
+
+        Ok(())
+    }
+
+    fn commit(self) -> Result<()> {
+        self.transaction.commit()?;
+        Ok(())
     }
 }

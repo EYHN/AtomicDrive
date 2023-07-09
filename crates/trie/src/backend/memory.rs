@@ -1,5 +1,9 @@
-use std::collections::{
-    btree_map::Entry as BTreeMapEntry, hash_map::Entry as HashMapEntry, BTreeMap, HashMap, HashSet,
+use std::{
+    collections::{
+        btree_map::Entry as BTreeMapEntry, hash_map::Entry as HashMapEntry, BTreeMap, HashMap,
+        HashSet,
+    },
+    marker::PhantomData,
 };
 
 use crate::{
@@ -69,6 +73,20 @@ impl<'a> Iterator for TrieMemoryBackendChildrenIter<'a> {
     }
 }
 
+pub struct TrieMemoryBackendLogIter<'a, M: TrieMarker + 'a, C: TrieContent + 'a> {
+    iter: Option<std::iter::Rev<std::slice::Iter<'a, LogOp<M, C>>>>,
+    m: PhantomData<M>,
+    c: PhantomData<C>,
+}
+
+impl<'a, M: TrieMarker + 'a, C: TrieContent + 'a> Iterator for TrieMemoryBackendLogIter<'a, M, C> {
+    type Item = Result<&'a LogOp<M, C>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.as_mut().and_then(|i| i.next().map(|i| Ok(i)))
+    }
+}
+
 impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackend<M, C> {
     fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
         Ok(self.ref_id_index.0.get(&r).cloned())
@@ -118,11 +136,15 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackend<M, C
     type IterLogItem<'a> = &'a LogOp<M, C>
     where
         Self: 'a;
-    type IterLog<'a> = std::iter::Rev<std::slice::Iter<'a, LogOp<M, C>>>
+    type IterLog<'a> = TrieMemoryBackendLogIter<'a, M, C>
     where
         Self: 'a;
-    fn iter_log(&self) -> Self::IterLog<'_> {
-        self.log.iter().rev()
+    fn iter_log(&self) -> Result<Self::IterLog<'_>> {
+        Ok(TrieMemoryBackendLogIter {
+            c: Default::default(),
+            m: Default::default(),
+            iter: Some(self.log.iter().rev()),
+        })
     }
 
     type Writer<'a> = TrieMemoryBackendWriter<'a, M, C>
@@ -184,10 +206,10 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackendWrite
     type IterLogItem<'a> = &'a LogOp<M, C>
     where
         Self: 'a;
-    type IterLog<'a> = std::iter::Rev<std::slice::Iter<'a, LogOp<M, C>>>
+    type IterLog<'a> = TrieMemoryBackendLogIter<'a, M, C>
     where
         Self: 'a;
-    fn iter_log(&self) -> Self::IterLog<'_> {
+    fn iter_log(&self) -> Result<Self::IterLog<'_>> {
         self.trie.iter_log()
     }
 
@@ -296,5 +318,9 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
 
     fn push_log(&mut self, log: LogOp<M, C>) -> Result<()> {
         Ok(self.trie.log.push(log))
+    }
+
+    fn commit(self) -> Result<()> {
+        Ok(())
     }
 }

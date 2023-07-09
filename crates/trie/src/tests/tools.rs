@@ -46,7 +46,7 @@ pub struct End {
 impl End {
     pub fn new(a: u64) -> Self {
         return End {
-            actor: a.to_owned(),
+            actor: a,
             clock: Default::default(),
             time: 0,
             trie: Trie::new(TrieMemoryBackend::default()),
@@ -61,7 +61,8 @@ impl End {
 
     pub fn ops_after(&self, after: &VClock<u64>) -> Vec<Op<Marker, String>> {
         let mut result = VecDeque::new();
-        for log in self.trie.backend.iter_log() {
+        for log in self.trie.backend.iter_log().unwrap() {
+            let log = log.unwrap();
             let log_dot = log.op.marker.clock.dot(log.op.marker.actor.clone());
             if log_dot > after.dot(log_dot.actor.clone()) {
                 result.push_front(log.op.clone())
@@ -84,13 +85,10 @@ impl End {
             self.clock
                 .apply(op.marker.clock.dot(op.marker.actor.clone()))
         }
-        self.trie
-            .write()
-            .unwrap()
-            .apply(ops)
-            .unwrap()
-            .commit()
-            .unwrap();
+        let mut writer = self.trie.write().unwrap();
+
+        writer.apply(ops).unwrap();
+        writer.commit().unwrap();
     }
 
     pub fn get_id(&self, path: &str) -> TrieId {
@@ -122,7 +120,13 @@ impl End {
 
     pub fn get_content(&self, path: &str) -> String {
         let id = self.get_id(path);
-        self.trie.get(id).unwrap().unwrap().borrow().content.to_owned()
+        self.trie
+            .get(id)
+            .unwrap()
+            .unwrap()
+            .borrow()
+            .content
+            .to_owned()
     }
 
     pub fn rename(&mut self, from: &str, to: &str) {

@@ -1,9 +1,10 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use trie::{backend::memory::TrieMemoryBackend, Op, Trie, TrieKey, TrieRef};
+use trie::{backend::rocks::TrieRocksBackend, Op, Trie, TrieKey, TrieRef};
 
 fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("trie apply 100 ops ordered", |b| {
-        let mut trie = Trie::new(TrieMemoryBackend::<u64, u64>::default());
+        let mut trie =
+            Trie::new(TrieRocksBackend::<u64, u64>::open_or_create_database("./100").unwrap());
         let mut i = 0;
         b.iter_batched(
             || {
@@ -29,7 +30,8 @@ fn criterion_benchmark(c: &mut Criterion) {
         )
     });
     c.bench_function("trie undo 100 ops and apply 1 op and redo 100 ops", |b| {
-        let mut trie = Trie::new(TrieMemoryBackend::<u64, u64>::default());
+        let mut trie =
+            Trie::new(TrieRocksBackend::<u64, u64>::open_or_create_database("./200").unwrap());
 
         let mut writer = trie.write().unwrap();
         writer

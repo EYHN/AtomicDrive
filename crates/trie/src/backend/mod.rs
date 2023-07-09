@@ -29,7 +29,9 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
     type GetChildrenId<'a>: Borrow<TrieId> + 'a
     where
         Self: 'a;
-    type GetChildren<'a>: Iterator<Item = Result<(Self::GetChildrenKey<'a>, Self::GetChildrenId<'a>)>>
+    type GetChildren<'a>: Iterator<
+        Item = Result<(Self::GetChildrenKey<'a>, Self::GetChildrenId<'a>)>,
+    >
     where
         Self: 'a;
     fn get_children(&self, id: TrieId) -> Result<Self::GetChildren<'_>>;
@@ -39,14 +41,15 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
     type IterLogItem<'a>: Borrow<LogOp<M, C>> + 'a
     where
         Self: 'a;
-    type IterLog<'a>: Iterator<Item = Self::IterLogItem<'a>>
+    type IterLog<'a>: Iterator<Item = Result<Self::IterLogItem<'a>>>
     where
         Self: 'a;
-    fn iter_log(&self) -> Self::IterLog<'_>;
+    fn iter_log(&self) -> Result<Self::IterLog<'_>>;
 
     fn get_ensure(&self, id: TrieId) -> Result<Self::Get<'_>> {
         self.get(id)?
-            .ok_or(Error::TreeBroken(format!("Trie id {id} not found")))
+            .ok_or_else(|| 
+                Error::TreeBroken(format!("Trie id {id} not found")))
     }
 
     fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
@@ -84,4 +87,6 @@ pub trait TrieBackendWriter<'a, M: TrieMarker, C: TrieContent>: TrieBackend<M, C
 
     fn pop_log(&mut self) -> Result<Option<LogOp<M, C>>>;
     fn push_log(&mut self, log: LogOp<M, C>) -> Result<()>;
+
+    fn commit(self) -> Result<()>;
 }
