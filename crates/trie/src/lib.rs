@@ -25,6 +25,10 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub enum TrieDiff {
+    Moved(Option<TrieId>, Option<TrieId>),
+}
+
 pub trait TrieContent: Clone + Hash + Default {
     fn digest(&self, d: &mut impl Digest);
 }
@@ -549,6 +553,10 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> Trie<M, C, B> {
             let (_, id) = child.unwrap();
             self.dbg_itemization(*id.borrow(), &path, base)
         }
+    }
+
+    fn diff<OtherB: TrieBackend<M, C>>(&self, other: &Trie<M, C, OtherB>) -> Vec<TrieDiff> {
+        todo!()
     }
 }
 

@@ -929,4 +929,9 @@ impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBack
         self.transaction.commit()?;
         Ok(())
     }
+
+    fn rollback(self) -> Result<()> {
+        self.transaction.rollback()?;
+        Ok(())
+    }
 }

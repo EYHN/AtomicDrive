@@ -323,4 +323,8 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
     fn commit(self) -> Result<()> {
         Ok(())
     }
+
+    fn rollback(self) -> Result<()> {
+        todo!()
+    }
 }

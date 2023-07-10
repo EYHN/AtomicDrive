@@ -89,4 +89,5 @@ pub trait TrieBackendWriter<'a, M: TrieMarker, C: TrieContent>: TrieBackend<M, C
     fn push_log(&mut self, log: LogOp<M, C>) -> Result<()>;
 
     fn commit(self) -> Result<()>;
+    fn rollback(self) -> Result<()>;
 }
