@@ -182,10 +182,6 @@ pub fn check(ends: &[&End], expect: &str) {
     for a in ends.iter() {
         for b in ends.iter() {
             assert_eq!(a.trie.to_string(), b.trie.to_string());
-            assert_eq!(
-                a.trie.get(ROOT).unwrap().unwrap().borrow().hash,
-                b.trie.get(ROOT).unwrap().unwrap().borrow().hash
-            );
         }
     }
     for e in ends {

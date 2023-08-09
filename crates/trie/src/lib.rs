@@ -285,7 +285,6 @@ impl Display for TrieHash {
 pub struct TrieNode<C: TrieContent> {
     pub parent: TrieId,
     pub key: TrieKey,
-    pub hash: TrieHash,
     pub content: C,
 }
 
@@ -293,7 +292,6 @@ impl<C: TrieContent + TrieSerialize> TrieSerialize for TrieNode<C> {
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes = self.parent.write_to_bytes(bytes);
         bytes = self.key.write_to_bytes_with_u32_be_header(bytes);
-        bytes = self.hash.write_to_bytes(bytes);
         bytes = self.content.write_to_bytes(bytes);
         bytes
     }
@@ -301,13 +299,11 @@ impl<C: TrieContent + TrieSerialize> TrieSerialize for TrieNode<C> {
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let (parent, bytes) = TrieId::parse_from_buffer(bytes, 8)?;
         let (key, bytes) = TrieKey::parse_from_buffer_with_u32_be_header(bytes)?;
-        let (hash, bytes) = TrieHash::parse_from_buffer(bytes, 32)?;
         let content = C::from_bytes(&bytes)?;
 
         Ok(Self {
             parent,
             key,
-            hash,
             content,
         })
     }
@@ -492,7 +488,7 @@ impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Debug for Tr
             items.iter().map(|(path, id, node)| {
                 (
                     path.as_ref(),
-                    format!("[{}] #{} {}", node.content.to_string(), id, node.hash),
+                    format!("[{}] #{}", node.content.to_string(), id),
                 )
             }),
             "/",
@@ -565,100 +561,12 @@ pub struct TrieUpdater<'a, M: TrieMarker, C: TrieContent, B: TrieBackend<M, C> +
 }
 
 impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, B> {
-    fn invalidate_hash(&mut self, mut id: TrieId) -> Result<()> {
-        loop {
-            let current = self.writer.get_ensure(id)?;
-            if current.borrow().hash.is_expired() {
-                break;
-            } else {
-                let parent = current.borrow().parent;
-                core::mem::drop(current);
-
-                self.writer.set_hash(id, TrieHash::expired())?;
-
-                if parent == id {
-                    break;
-                } else {
-                    id = parent;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn calculate_hash(&mut self, root: TrieId) -> Result<()> {
-        let mut search_pass = Vec::from([root]);
-        let mut calculate_pass = Vec::from([]);
-
-        while let Some(current) = search_pass.pop() {
-            let current_node_children = self.writer.get_children(current)?;
-
-            for child in current_node_children {
-                let (_, child_id) = child?;
-                let child = self.writer.get_ensure(*child_id.borrow())?;
-
-                if child.borrow().hash.is_expired() {
-                    search_pass.push(*child_id.borrow());
-                }
-            }
-
-            calculate_pass.push(current)
-        }
-
-        while let Some(current) = calculate_pass.pop() {
-            let current_node = self.writer.get_ensure(current)?;
-            let current_node_children = self.writer.get_children(current)?;
-
-            let mut hasher = Sha256::new();
-
-            let mut children_len: u64 = 0;
-
-            for child in current_node_children {
-                let (key, child_id) = child?;
-                let child = self.writer.get_ensure(*child_id.borrow())?;
-
-                hasher.update(&key.borrow().0.as_bytes());
-
-                hasher.update(&key.borrow().0.len().to_be_bytes());
-
-                hasher.update(&b"|");
-
-                hasher.update(&child.borrow().hash);
-
-                hasher.update(&b"|");
-
-                children_len += 1;
-            }
-
-            hasher.update(&children_len.to_be_bytes());
-
-            hasher.update(&b"|");
-
-            current_node.borrow().content.digest(&mut hasher);
-
-            core::mem::drop(current_node);
-
-            let hash = hasher.finalize();
-            self.writer
-                .set_hash(current, TrieHash(hash[0..32].try_into().unwrap()))?;
-        }
-
-        Ok(())
-    }
-
     fn move_node(
         &mut self,
         id: TrieId,
         to: Option<(TrieId, TrieKey, C)>,
     ) -> Result<Option<(TrieId, TrieKey, C)>> {
-        if let Some((to_parent_id, _, _)) = &to {
-            self.invalidate_hash(*to_parent_id)?;
-        }
         let old = self.writer.set_tree_node(id, to)?;
-        if let Some((old_parent_id, _, _)) = &old {
-            self.invalidate_hash(*old_parent_id)?;
-        }
         Ok(old)
     }
 
@@ -842,8 +750,6 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
             let redo_log_op: LogOp<M, C> = self.do_op(redo)?;
             self.writer.push_log(redo_log_op)?;
         }
-
-        self.calculate_hash(ROOT)?;
 
         Ok(self)
     }

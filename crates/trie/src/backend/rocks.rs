@@ -318,7 +318,6 @@ mod values_tests {
                 &TestValue::NodeInfo(TrieNode {
                     parent: TrieId::from(199),
                     key: TrieKey::from("world".to_string()),
-                    hash: TrieHash::expired(),
                     content: 256
                 })
                 .to_bytes()
@@ -327,7 +326,6 @@ mod values_tests {
             TestValue::NodeInfo(TrieNode {
                 parent: TrieId::from(199),
                 key: TrieKey::from("world".to_string()),
-                hash: TrieHash::expired(),
                 content: 256
             })
         );
@@ -431,7 +429,6 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieRocksBac
             Values::NodeInfo(TrieNode {
                 parent: ROOT,
                 key: TrieKey(Default::default()),
-                hash: TrieHash::expired(),
                 content: Default::default(),
             }),
         )?;
@@ -440,7 +437,6 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieRocksBac
             Values::NodeInfo(TrieNode {
                 parent: CONFLICT,
                 key: TrieKey(Default::default()),
-                hash: TrieHash::expired(),
                 content: Default::default(),
             }),
         )?;
@@ -785,20 +781,6 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<
 impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackendWriter<'a, M, C>
     for TrieRocksBackendWriter<'a, M, C>
 {
-    fn set_hash(&mut self, id: TrieId, hash: TrieHash) -> Result<()> {
-        if let Some(mut info) = self
-            .get(Keys::NodeInfo(id))?
-            .map(|v| v.node_info())
-            .transpose()?
-        {
-            info.hash = hash;
-            self.set(Keys::NodeInfo(id), Values::NodeInfo(info))?;
-            Ok(())
-        } else {
-            Err(Error::TreeBroken(format!("id {id} not found")))
-        }
-    }
-
     fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>> {
         let old_id = if let Some(id) = self
             .get(Keys::RefIdIndex(r.to_owned()))?
@@ -882,7 +864,6 @@ impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBack
                 Values::NodeInfo(TrieNode {
                     parent: to.0,
                     key: to.1,
-                    hash: TrieHash::expired(),
                     content: to.2,
                 }),
             )?;

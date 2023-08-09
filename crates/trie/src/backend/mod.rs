@@ -73,8 +73,6 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
 }
 
 pub trait TrieBackendWriter<'a, M: TrieMarker, C: TrieContent>: TrieBackend<M, C> {
-    fn set_hash(&mut self, id: TrieId, hash: TrieHash) -> Result<()>;
-
     fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>>;
 
     fn create_id(&mut self) -> Result<TrieId>;

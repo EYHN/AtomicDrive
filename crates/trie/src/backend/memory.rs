@@ -36,7 +36,6 @@ impl<M: TrieMarker, C: TrieContent> Default for TrieMemoryBackend<M, C> {
                     TrieNode {
                         parent: ROOT,
                         key: TrieKey(Default::default()),
-                        hash: TrieHash::expired(),
                         content: Default::default(),
                     },
                 ),
@@ -45,7 +44,6 @@ impl<M: TrieMarker, C: TrieContent> Default for TrieMemoryBackend<M, C> {
                     TrieNode {
                         parent: CONFLICT,
                         key: TrieKey(Default::default()),
-                        hash: TrieHash::expired(),
                         content: Default::default(),
                     },
                 ),
@@ -224,15 +222,6 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackendWrite
 impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
     for TrieMemoryBackendWriter<'a, M, C>
 {
-    fn set_hash(&mut self, id: TrieId, hash: TrieHash) -> Result<()> {
-        if let Some(current) = self.trie.tree.get_mut(&id) {
-            current.hash = hash;
-            Ok(())
-        } else {
-            Err(Error::TreeBroken(format!("id {id} not found")))
-        }
-    }
-
     fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>> {
         let old_id = if let Some(id) = self.trie.ref_id_index.0.remove(&r) {
             if let Some(refs) = self.trie.ref_id_index.1.get_mut(&id) {
@@ -299,7 +288,6 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
                 TrieNode {
                     parent: to.0,
                     key: to.1,
-                    hash: TrieHash::expired(),
                     content: to.2,
                 },
             );
