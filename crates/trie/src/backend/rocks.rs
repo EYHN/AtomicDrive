@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use rocksdb::{DBAccess, OptimisticTransactionDB, Transaction};
 
 use crate::{
-    Error, LogOp, Result, TrieContent, TrieHash, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef,
+    Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef,
     TrieSerialize, CONFLICT, ROOT,
 };
 
@@ -295,7 +295,7 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> Values<M, C>
 
 #[cfg(test)]
 mod values_tests {
-    use crate::{LogOp, Op, TrieHash, TrieId, TrieKey, TrieNode, TrieRef, Undo};
+    use crate::{LogOp, Op, TrieId, TrieKey, TrieNode, TrieRef, Undo};
 
     use super::{Keys, Values};
 
@@ -498,10 +498,10 @@ impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize, D: DBAcc
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().and_then(|i| {
-            i.map_err(|e| Error::from(e))
+            i.map_err(Error::from)
                 .and_then(|item| {
                     if let Some(ref check_upper_bound) = self.check_upper_bound {
-                        if &item.0[..] >= &check_upper_bound[..] {
+                        if item.0[..] >= check_upper_bound[..] {
                             return Ok(None);
                         }
                     }
@@ -534,7 +534,7 @@ impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize, D: DBAcc
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().map(|i| {
-            i.map_err(|e| Error::from(e)).and_then(|item| {
+            i.map_err(Error::from).and_then(|item| {
                 let key = Keys::parse(&item.0)?;
                 let value = Values::<M, C>::parse(&key, &item.1)?.log()?;
 
@@ -640,7 +640,7 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<
     type Writer<'a> = TrieRocksBackendWriter<'a, M, C>
     where Self: 'a;
 
-    fn write<'a>(&'a mut self) -> Result<Self::Writer<'a>> {
+    fn write(&'_ mut self) -> Result<Self::Writer<'_>> {
         Ok(Self::Writer {
             transaction: self.db.transaction(),
             m: Default::default(),
@@ -667,12 +667,12 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize>
     }
 
     fn set(&self, key: Keys, value: Values<M, C>) -> Result<()> {
-        self.transaction.put(&key.to_bytes(), &value.to_bytes())?;
+        self.transaction.put(key.to_bytes(), value.to_bytes())?;
         Ok(())
     }
 
     fn del(&self, key: Keys) -> Result<()> {
-        self.transaction.delete(&key.to_bytes())?;
+        self.transaction.delete(key.to_bytes())?;
         Ok(())
     }
 }
@@ -758,7 +758,7 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<
         *upper_bound.last_mut().unwrap() += 1;
         let mut read_opt = rocksdb::ReadOptions::default();
         read_opt.set_iterate_upper_bound(upper_bound);
-        let mut iter = self.transaction.iterator_opt(
+        let iter = self.transaction.iterator_opt(
             rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
             read_opt,
         );
@@ -773,7 +773,7 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<
     type Writer<'a> = TrieRocksBackendWriter<'a, M, C>
     where Self: 'a;
 
-    fn write<'a>(&'a mut self) -> Result<Self::Writer<'a>> {
+    fn write(&'_ mut self) -> Result<Self::Writer<'_>> {
         Err(Error::InvalidOp("not support".to_string()))
     }
 }
@@ -787,18 +787,18 @@ impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBack
             .map(|v| v.ref_id_index())
             .transpose()?
         {
-            if let Some(mut refs) = self
+            if let Some(mut id_refs) = self
                 .get(Keys::IdRefsIndex(id))?
                 .map(|v| v.id_refs_index())
                 .transpose()?
             {
-                if let Some(i) = refs.iter().position(|r| r == r) {
-                    refs.remove(i);
+                if let Some(i) = id_refs.iter().position(|id_ref| id_ref == &r) {
+                    id_refs.remove(i);
                 }
-                if refs.is_empty() {
+                if id_refs.is_empty() {
                     self.del(Keys::IdRefsIndex(id))?;
                 } else {
-                    self.set(Keys::IdRefsIndex(id), Values::IdRefsIndex(refs))?;
+                    self.set(Keys::IdRefsIndex(id), Values::IdRefsIndex(id_refs))?;
                 }
             }
             self.del(Keys::RefIdIndex(r.to_owned()))?;
@@ -815,7 +815,7 @@ impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBack
                 .transpose()?
             {
                 if refs.iter().all(|item| item != &r) {
-                    refs.push(r.to_owned());
+                    refs.push(r);
                     self.set(Keys::IdRefsIndex(id), Values::IdRefsIndex(refs))?;
                 }
             } else {
