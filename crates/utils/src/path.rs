@@ -79,7 +79,7 @@ impl PathTools {
                 break;
             }
             if i == from_end || from.chars().nth(i) == Some(PathTools::DIRECTORY_SEPARATOR_CHAR) {
-                out.push_str(if out.len() == 0 { ".." } else { "/.." });
+                out.push_str(if out.is_empty() { ".." } else { "/.." });
             }
 
             i += 1;

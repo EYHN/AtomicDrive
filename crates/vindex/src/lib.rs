@@ -1,3 +1,4 @@
+#[allow(clippy::all)]
 mod trie;
 mod vindex;
 mod vindexreg;

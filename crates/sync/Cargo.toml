@@ -7,12 +7,13 @@ edition = "2021"
 utils = { path = "../utils" }
 file = { path = "../file" }
 file_local = { path = "../file_local" }
-vindex = { path = "../vindex" }
+trie = { path = "../trie" }
 chunk = { path = "../chunk" }
 libp2p = { version = "0.51.2" }
 parking_lot = "0.12.1"
 crdts = "7.3.0"
 egui = "0.21.0"
+sha2 = "0.10.6"
 
 [profile.release]
 debug = 1

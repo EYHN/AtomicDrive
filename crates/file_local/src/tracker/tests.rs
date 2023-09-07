@@ -105,7 +105,7 @@ fn test() {
         println!(
             "{} => {}",
             bytes_stringify(&key.to_bytes().unwrap()),
-            bytes_stringify(&value.to_bytes().unwrap())
+            bytes_stringify(&value.into_bytes().unwrap())
         );
     }
 

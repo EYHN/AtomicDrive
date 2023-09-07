@@ -43,7 +43,7 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
         add_ctx: AddCtx<IndexPeerId>,
     ) -> VIndexOp<IndexedObject> {
         (
-            add_ctx.dot.clone(),
+            add_ctx.dot,
             self.map.update(key, add_ctx, |_, add_ctx| {
                 VIndexReg::new(object, add_ctx.clock, timestamp, peer_id)
             }),
@@ -70,7 +70,7 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
 
     pub fn rm(&self, key: impl Into<String>, add_ctx: AddCtx<IndexPeerId>) -> VIndexOp<IndexedObject> {
         (
-            add_ctx.dot.clone(),
+            add_ctx.dot,
             self.map.rm(
                 key,
                 RmCtx {
@@ -95,8 +95,7 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
     pub fn ops_after(&self, after: &VClock<IndexPeerId>) -> Vec<VIndexOp<IndexedObject>> {
         self.ops
             .iter()
-            .filter(|(dot, _)| dot > &after.dot(dot.actor))
-            .map(|op| op.clone())
+            .filter(|(dot, _)| dot > &after.dot(dot.actor)).cloned()
             .collect()
     }
 
@@ -137,7 +136,7 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> CmRDT for VIndex<Indexe
     fn apply(&mut self, op: Self::Op) {
         self.map.apply(op.1.clone());
         self.clock.apply(op.0);
-        self.ops.push(op.clone());
+        self.ops.push(op);
     }
 }
 

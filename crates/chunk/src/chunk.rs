@@ -1,12 +1,20 @@
 use std::fmt::{Debug, Display};
 
+use trie::TrieContent;
 use utils::bytes_stringify;
 use xxhash_rust::xxh3::xxh3_128;
+use sha2::Digest;
 
 #[derive(Default, Clone, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HashChunks {
     chunks: Vec<HashChunk>,
     hash: [u8; 16],
+}
+
+impl TrieContent for HashChunks {
+    fn digest(&self, d: &mut impl Digest) {
+        d.update(self.hash)
+    }
 }
 
 impl Display for HashChunks {

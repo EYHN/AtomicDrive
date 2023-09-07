@@ -57,7 +57,7 @@ impl SyncingDrive {
 
         let mut vindex_lock = vindex.lock();
         for event in fs.quick_full_walk() {
-            apply_file_event(event, fs.clone(), &mut vindex_lock, peer_id.clone());
+            apply_file_event(event, fs.clone(), &mut vindex_lock, peer_id);
         }
         std::mem::drop(vindex_lock);
 
@@ -70,7 +70,7 @@ impl SyncingDrive {
                     event,
                     fs_for_watch.clone(),
                     &mut vindex_lock,
-                    peer_id.clone(),
+                    peer_id,
                 );
             }
         }));

@@ -154,13 +154,13 @@ impl<M: TrieMarker, C: TrieContent + Display> Display for Trie<M, C> {
         self.itemization(TrieId(0), "", &mut items);
 
         f.write_str(&tree_stringify(
-            items.iter().map(|(path, id, node)| {
+            items.iter().map(|(path, _id, node)| {
                 (
                     path.as_ref(),
                     if node.content.to_string().is_empty() {
                         "".to_string()
                     } else {
-                        format!("[{}]", node.content.to_string())
+                        format!("[{}]", node.content)
                     },
                 )
             }),
@@ -178,7 +178,7 @@ impl<M: TrieMarker, C: TrieContent + Display> Debug for Trie<M, C> {
             items.iter().map(|(path, id, node)| {
                 (
                     path.as_ref(),
-                    format!("[{}] #{} {}", node.content.to_string(), id, node.hash),
+                    format!("[{}] #{} {}", node.content, id, node.hash),
                 )
             }),
             "/",
@@ -301,11 +301,9 @@ struct TrieUpdater<'a, M: TrieMarker, C: TrieContent> {
 impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
     fn do_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Option<TrieId> {
         let old_id = if let Some(id) = self.target.ref_id_index.0.get(&r) {
-            if let Some(refs) = self.target.ref_id_index.1.get_mut(&id) {
-                if refs.remove(&r) {
-                    if refs.is_empty() {
-                        self.target.ref_id_index.1.remove(&id);
-                    }
+            if let Some(refs) = self.target.ref_id_index.1.get_mut(id) {
+                if refs.remove(&r) && refs.is_empty() {
+                    self.target.ref_id_index.1.remove(id);
                 }
             }
             Some(id.to_owned())
@@ -316,7 +314,7 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
             self.target.ref_id_index.0.insert(r.to_owned(), id);
             match self.target.ref_id_index.1.entry(id) {
                 HashMapEntry::Occupied(mut entry) => {
-                    entry.get_mut().insert(r.to_owned());
+                    entry.get_mut().insert(r);
                 }
                 HashMapEntry::Vacant(entry) => {
                     entry.insert(HashSet::from([r]));
@@ -341,7 +339,7 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
         if let Some(node) = &node {
             if let Some(parent) = self.target.tree.get_mut(&node.parent) {
                 if parent.children.remove(&node.key).is_none() {
-                    return Err(Error::TreeBroken(format!("bad state")));
+                    return Err(Error::TreeBroken("bad state".to_string()));
                 }
             }
         }
@@ -438,7 +436,7 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
                                 to: Some((
                                     CONFLICT,
                                     TrieKey(conflict_node_id.to_string()),
-                                    conflict_node.content.to_owned(),
+                                    conflict_node.content,
                                 )),
                             });
 
@@ -492,14 +490,15 @@ impl<M: TrieMarker, C: TrieContent> TrieUpdater<'_, M, C> {
     }
 
     fn exec_undo(&mut self, d: Undo<C>) -> Result<()> {
-        Ok(match d {
+        match d {
             Undo::Ref(r, id) => {
                 self.do_ref(r, id);
             }
             Undo::Move { id, to } => {
                 self.move_node(id, to)?;
             }
-        })
+        };
+        Ok(())
     }
 
     fn undo_op(&mut self, log: &LogOp<M, C>) -> Result<()> {
@@ -625,12 +624,12 @@ mod tests {
 
     impl End {
         fn new(a: u64) -> Self {
-            return End {
+            End {
                 actor: a.to_owned(),
                 clock: Default::default(),
                 time: 0,
                 trie: Default::default(),
-            };
+            }
         }
 
         fn clone_as(&self, a: u64) -> Self {
@@ -642,13 +641,13 @@ mod tests {
         fn ops_after(&self, after: &VClock<u64>) -> Vec<Op<Marker, String>> {
             let mut result = VecDeque::new();
             for log in self.trie.log.iter().rev() {
-                let log_dot = log.op.marker.clock.dot(log.op.marker.actor.clone());
-                if log_dot > after.dot(log_dot.actor.clone()) {
+                let log_dot = log.op.marker.clock.dot(log.op.marker.actor);
+                if log_dot > after.dot(log_dot.actor) {
                     result.push_front(log.op.clone())
                 }
             }
 
-            return result.into_iter().collect();
+            result.into_iter().collect()
         }
 
         fn sync_with(&mut self, other: &mut Self) {
@@ -662,7 +661,7 @@ mod tests {
         fn apply(&mut self, ops: Vec<Op<Marker, String>>) {
             for op in ops.iter() {
                 self.clock
-                    .apply(op.marker.clock.dot(op.marker.actor.clone()))
+                    .apply(op.marker.clock.dot(op.marker.actor))
             }
             self.trie.write().apply(ops).unwrap().commit();
         }
@@ -706,11 +705,11 @@ mod tests {
             let filename = PathTools::basename(to).to_owned();
             let to = self.get_ref(PathTools::dirname(to));
 
-            self.clock.apply(self.clock.inc(self.actor.clone()));
+            self.clock.apply(self.clock.inc(self.actor));
 
             self.apply(vec![Op {
                 marker: Marker {
-                    actor: self.actor.clone(),
+                    actor: self.actor,
                     clock: self.clock.clone(),
                     time: self.time,
                 },
@@ -725,11 +724,11 @@ mod tests {
             let filename = PathTools::basename(to).to_owned();
             let to = self.get_ref(PathTools::dirname(to));
 
-            self.clock.apply(self.clock.inc(self.actor.clone()));
+            self.clock.apply(self.clock.inc(self.actor));
 
             self.apply(vec![Op {
                 marker: Marker {
-                    actor: self.actor.clone(),
+                    actor: self.actor,
                     clock: self.clock.clone(),
                     time: self.time,
                 },

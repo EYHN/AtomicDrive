@@ -15,7 +15,7 @@ pub type Result<T> = std::result::Result<T, error::Error>;
 type TransactionDB = rocksdb::TransactionDB<rocksdb::MultiThreaded>;
 
 #[derive(Debug)]
-enum Keys {
+pub enum Keys {
     FilePath(FileFullPath),
     FileInfo(FileIdentifier),
 }
@@ -55,7 +55,7 @@ impl Keys {
         let mut bytes = Vec::with_capacity(size);
         bytes.extend_from_slice(label);
         bytes.push(b':');
-        bytes.extend_from_slice(&args);
+        bytes.extend_from_slice(args);
         debug_assert!(bytes.len() == size);
 
         Ok(bytes)
@@ -78,13 +78,13 @@ impl Keys {
 }
 
 #[derive(Debug)]
-enum Values {
+pub enum Values {
     FilePath(FileType, FileIdentifier),
     FileInfo(FileUpdateToken),
 }
 
 impl Values {
-    fn to_bytes(self) -> Result<Vec<u8>> {
+    fn into_bytes(self) -> Result<Vec<u8>> {
         match self {
             Values::FilePath(file_type, file_id) => {
                 let size = file_id.len() + 1;
@@ -139,6 +139,7 @@ pub enum IndexInput {
 }
 
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum EventType {
     FilePathCreate,
     FilePathUpdate,
@@ -192,6 +193,7 @@ impl LocalFileSystemTracker {
         // prev_file: The file associated with the url before the operation
         // next_file: The file associated with the url after the operation
 
+        #[allow(clippy::too_many_arguments)]
         fn explore(
             operation: &Operation,
             file_path: FileFullPath,
@@ -237,20 +239,18 @@ impl LocalFileSystemTracker {
                     }
                 }
 
-                return Ok(());
+                Ok(())
+            } else if let Some((next_file_type, next_file_id, next_file_update_token)) = next_file {
+                create.push((
+                    file_path,
+                    next_file_type,
+                    next_file_id,
+                    next_file_update_token,
+                ));
+                Ok(())
             } else {
-                if let Some((next_file_type, next_file_id, next_file_update_token)) = next_file {
-                    create.push((
-                        file_path,
-                        next_file_type,
-                        next_file_id,
-                        next_file_update_token,
-                    ));
-                    return Ok(());
-                } else {
-                    // do nothing
-                    return Ok(());
-                }
+                // do nothing
+                Ok(())
             }
         }
 
@@ -458,30 +458,6 @@ impl Operation<'_> {
         Operation::<'db> { transaction }
     }
 
-    fn get_for_update_file_path_batch(
-        &self,
-        file_path: Vec<FileFullPath>,
-    ) -> Result<Vec<Option<(FileType, FileIdentifier)>>> {
-        let mut keys = Vec::with_capacity(file_path.len());
-        for file_path in file_path {
-            keys.push(Keys::FilePath(file_path).to_bytes()?)
-        }
-
-        let values = self.get_for_update_in_order(keys)?;
-
-        let mut result = Vec::with_capacity(values.len());
-
-        for value in values {
-            result.push(if let Some(value) = value {
-                Some(Values::parse_file_path(value)?)
-            } else {
-                None
-            })
-        }
-
-        Ok(result)
-    }
-
     fn get_for_update_file_path(
         &self,
         file_path: FileFullPath,
@@ -517,16 +493,6 @@ impl Operation<'_> {
         }
 
         Ok(result)
-    }
-
-    fn get_for_update_file_info(&self, file_id: FileIdentifier) -> Result<Option<FileUpdateToken>> {
-        let key = Keys::FileInfo(file_id.clone());
-        let value = self.get_for_update(key.to_bytes()?, true)?;
-        if let Some(value) = value {
-            Ok(Some(Values::parse_file_info(value)?))
-        } else {
-            Ok(None)
-        }
     }
 
     fn get_for_update_all_children_paths(
@@ -586,15 +552,13 @@ impl Operation<'_> {
                     let slash_position = suffix.chars().position(|a| a == '/');
                     if let Some(slash_position) = slash_position {
                         let mut next: Vec<u8> = Keys::path_prefix(
-                            (&file_path_str[0..slash_position + base_path_len + 1]).to_owned(),
+                            file_path_str[0..slash_position + base_path_len + 1].to_owned(),
                         );
                         *next.last_mut().unwrap() += 1;
                         iter.set_mode(rocksdb::IteratorMode::From(&next, Direction::Forward))
-                    } else {
-                        if let Some(value) = self.get_for_update(&key_bytes, true)? {
-                            let (file_type, file_id) = Values::parse_file_path(value)?;
-                            result.push((suffix.to_owned(), file_type, file_id));
-                        }
+                    } else if let Some(value) = self.get_for_update(&key_bytes, true)? {
+                        let (file_type, file_id) = Values::parse_file_path(value)?;
+                        result.push((suffix.to_owned(), file_type, file_id));
                     }
                 }
             } else {
@@ -626,7 +590,7 @@ impl Operation<'_> {
         file_update_token: FileUpdateToken,
     ) -> Result<()> {
         let key = Keys::FileInfo(file_id).to_bytes()?;
-        let value = Values::FileInfo(file_update_token).to_bytes()?;
+        let value = Values::FileInfo(file_update_token).into_bytes()?;
         Ok(self.put(key, value)?)
     }
 
@@ -637,7 +601,7 @@ impl Operation<'_> {
         file_id: FileIdentifier,
     ) -> Result<()> {
         let key = Keys::FilePath(file_path).to_bytes()?;
-        let value = Values::FilePath(file_type, file_id).to_bytes()?;
+        let value = Values::FilePath(file_type, file_id).into_bytes()?;
         Ok(self.put(key, value)?)
     }
 

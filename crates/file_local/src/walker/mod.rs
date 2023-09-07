@@ -65,7 +65,6 @@ impl std::ops::DerefMut for LocalFileSystemWalkerIter<'_> {
 pub struct LocalFileSystemWalker {
     root: PathBuf,
     current_stack: LinkedList<PathBuf>,
-    total: Option<usize>,
     current_position: usize,
 }
 
@@ -74,7 +73,6 @@ impl LocalFileSystemWalker {
         let mut walker = Self {
             root: root.as_ref().to_owned(),
             current_stack: Default::default(),
-            total: None,
             current_position: 0,
         };
         walker.start_new_walking();

@@ -4,7 +4,7 @@ pub mod rocks;
 use std::borrow::Borrow;
 
 use crate::{
-    Error, LogOp, Result, TrieContent, TrieHash, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef,
+    Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef, ROOT,
 };
 
 pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
@@ -66,10 +66,48 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
         Ok(false)
     }
 
+    fn get_id_by_path(&self, path: &str) -> Result<Option<TrieId>> {
+        let mut id = ROOT;
+        if path != "/" {
+            for part in path.split('/').skip(1) {
+                if let Some(child_id) = self.get_child(id, TrieKey(part.to_string()))? {
+                    id = child_id
+                } else {
+                    return Ok(None);
+                }
+            }
+        }
+
+        Ok(Some(id))
+    }
+
+    fn get_refs_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<Self::GetRefs<'_>>> {
+        self.get_id_by_path(path).and_then(|id| {
+            if let Some(id) = id {
+                self.get_refs(id)
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn get_by_path(&self, path: &str) -> Result<Option<Self::Get<'_>>> {
+        self.get_id_by_path(path).and_then(|id| {
+            if let Some(id) = id {
+                self.get(id)
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
     type Writer<'a>: TrieBackendWriter<'a, M, C>
     where
         Self: 'a;
-    fn write<'a>(&'a mut self) -> Result<Self::Writer<'a>>;
+    fn write(&mut self) -> Result<Self::Writer<'_>>;
 }
 
 pub trait TrieBackendWriter<'a, M: TrieMarker, C: TrieContent>: TrieBackend<M, C> {

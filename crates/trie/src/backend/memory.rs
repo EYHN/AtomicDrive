@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    Error, LogOp, Result, TrieContent, TrieHash, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef,
+    Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef,
     CONFLICT, ROOT,
 };
 
@@ -67,7 +67,7 @@ impl<'a> Iterator for TrieMemoryBackendChildrenIter<'a> {
     type Item = Result<(&'a TrieKey, &'a TrieId)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.as_mut().and_then(|i| i.next().map(|i| Ok(i)))
+        self.iter.as_mut().and_then(|i| i.next().map(Ok))
     }
 }
 
@@ -81,7 +81,7 @@ impl<'a, M: TrieMarker + 'a, C: TrieContent + 'a> Iterator for TrieMemoryBackend
     type Item = Result<&'a LogOp<M, C>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.as_mut().and_then(|i| i.next().map(|i| Ok(i)))
+        self.iter.as_mut().and_then(|i| i.next().map(Ok))
     }
 }
 
@@ -148,7 +148,7 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackend<M, C
     type Writer<'a> = TrieMemoryBackendWriter<'a, M, C>
     where Self: 'a;
 
-    fn write<'a>(&'a mut self) -> Result<Self::Writer<'a>> {
+    fn write(&mut self) -> Result<Self::Writer<'_>> {
         Ok(Self::Writer { trie: self })
     }
 }
@@ -214,7 +214,7 @@ impl<M: TrieMarker, C: TrieContent> TrieBackend<M, C> for TrieMemoryBackendWrite
     type Writer<'a> = TrieMemoryBackendWriter<'a, M, C>
     where Self: 'a;
 
-    fn write<'a>(&'a mut self) -> Result<Self::Writer<'a>> {
+    fn write(&mut self) -> Result<Self::Writer<'_>> {
         Err(Error::InvalidOp("not support".to_string()))
     }
 }
@@ -225,10 +225,8 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
     fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>> {
         let old_id = if let Some(id) = self.trie.ref_id_index.0.remove(&r) {
             if let Some(refs) = self.trie.ref_id_index.1.get_mut(&id) {
-                if refs.remove(&r) {
-                    if refs.is_empty() {
-                        self.trie.ref_id_index.1.remove(&id);
-                    }
+                if refs.remove(&r) && refs.is_empty() {
+                    self.trie.ref_id_index.1.remove(&id);
                 }
             }
             Some(id)
@@ -239,7 +237,7 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
             self.trie.ref_id_index.0.insert(r.to_owned(), id);
             match self.trie.ref_id_index.1.entry(id) {
                 HashMapEntry::Occupied(mut entry) => {
-                    entry.get_mut().insert(r.to_owned());
+                    entry.get_mut().insert(r);
                 }
                 HashMapEntry::Vacant(entry) => {
                     entry.insert(HashSet::from([r]));
@@ -264,7 +262,7 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
         if let Some(node) = &node {
             if let Some(parent_children) = self.trie.children.get_mut(&node.parent) {
                 if parent_children.remove(&node.key).is_none() {
-                    return Err(Error::TreeBroken(format!("bad state")));
+                    return Err(Error::TreeBroken("bad state".to_string()));
                 }
             }
         }
@@ -305,7 +303,8 @@ impl<'a, M: TrieMarker, C: TrieContent> TrieBackendWriter<'a, M, C>
     }
 
     fn push_log(&mut self, log: LogOp<M, C>) -> Result<()> {
-        Ok(self.trie.log.push(log))
+        self.trie.log.push(log);
+        Ok(())
     }
 
     fn commit(self) -> Result<()> {

@@ -1,9 +1,9 @@
 pub mod backend;
 
-use std::{borrow::Borrow, cmp::Ordering, fmt::Display, marker::PhantomData};
+use std::{borrow::Borrow, cmp::Ordering, fmt::Display, marker::PhantomData, ops::Deref};
 
 use backend::{TrieBackend, TrieBackendWriter};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::fmt::Debug;
 use thiserror::Error;
 use utils::tree_stringify;
@@ -41,7 +41,7 @@ impl TrieContent for String {
 
 impl TrieContent for u64 {
     fn digest(&self, d: &mut impl Digest) {
-        d.update(&self.to_be_bytes())
+        d.update(self.to_be_bytes())
     }
 }
 
@@ -54,7 +54,7 @@ pub trait TrieSerialize: Clone + Sized {
     fn from_bytes(bytes: &[u8]) -> Result<Self>;
 
     fn write_to_bytes_with_u32_be_header(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes.extend_from_slice(&(0 as u32).to_be_bytes());
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
         let start = bytes.len();
         bytes = self.write_to_bytes(bytes);
         let size = ((bytes.len() - start) as u32).to_be_bytes();
@@ -164,7 +164,7 @@ pub struct TrieKey(pub String);
 
 impl TrieKey {
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0.as_bytes()
+        self.0.as_bytes()
     }
 }
 
@@ -299,7 +299,7 @@ impl<C: TrieContent + TrieSerialize> TrieSerialize for TrieNode<C> {
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let (parent, bytes) = TrieId::parse_from_buffer(bytes, 8)?;
         let (key, bytes) = TrieKey::parse_from_buffer_with_u32_be_header(bytes)?;
-        let content = C::from_bytes(&bytes)?;
+        let content = C::from_bytes(bytes)?;
 
         Ok(Self {
             parent,
@@ -356,7 +356,7 @@ impl<C: TrieContent + TrieSerialize> TrieSerialize for Undo<C> {
             b'r' => {
                 let (r, bytes) = TrieRef::parse_from_buffer(&bytes[1..], 16)?;
                 let id = if !bytes.is_empty() {
-                    let (id, _) = TrieId::parse_from_buffer(&bytes, 8)?;
+                    let (id, _) = TrieId::parse_from_buffer(bytes, 8)?;
                     Some(id)
                 } else {
                     None
@@ -406,7 +406,7 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieSerializ
         let (child_key, bytes) = TrieKey::parse_from_buffer_with_u32_be_header(bytes)?;
         let (child_ref, bytes) = TrieRef::parse_from_buffer(bytes, 16)?;
         let (marker, bytes) = M::parse_from_buffer_with_u32_be_header(bytes)?;
-        let child_content = C::from_bytes(&bytes)?;
+        let child_content = C::from_bytes(bytes)?;
 
         Ok(Self {
             marker,
@@ -470,7 +470,7 @@ impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Display for 
                     if node.content.to_string().is_empty() {
                         "".to_string()
                     } else {
-                        format!("[{}]", node.content.to_string())
+                        format!("[{}]", node.content)
                     },
                 )
             }),
@@ -485,12 +485,9 @@ impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Debug for Tr
         self.dbg_itemization(ROOT, "", &mut items);
 
         f.write_str(&tree_stringify(
-            items.iter().map(|(path, id, node)| {
-                (
-                    path.as_ref(),
-                    format!("[{}] #{}", node.content.to_string(), id),
-                )
-            }),
+            items
+                .iter()
+                .map(|(path, id, node)| (path.as_ref(), format!("[{}] #{}", node.content, id))),
             "/",
         ))
     }
@@ -503,29 +500,6 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> Trie<M, C, B> {
             m: Default::default(),
             c: Default::default(),
         }
-    }
-
-    pub fn get_refs(
-        &self,
-        id: TrieId,
-    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
-        self.backend.get_refs(id)
-    }
-
-    pub fn get(&self, id: TrieId) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
-        self.backend.get(id)
-    }
-
-    pub fn get_children(
-        &self,
-        id: TrieId,
-    ) -> Result<impl Iterator<Item = Result<(impl Borrow<TrieKey> + '_, impl Borrow<TrieId> + '_)>>>
-    {
-        self.backend.get_children(id)
-    }
-
-    pub fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
-        self.backend.get_child(id, key)
     }
 
     pub fn write(&mut self) -> Result<TrieUpdater<'_, M, C, B>> {
@@ -551,8 +525,19 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> Trie<M, C, B> {
         }
     }
 
-    fn diff<OtherB: TrieBackend<M, C>>(&self, other: &Trie<M, C, OtherB>) -> Vec<TrieDiff> {
+    #[allow(dead_code)]
+    fn diff<OtherB: TrieBackend<M, C>>(&self, _other: &Trie<M, C, OtherB>) -> Vec<TrieDiff> {
         todo!()
+    }
+}
+
+impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> std::ops::Deref
+    for Trie<M, C, B>
+{
+    type Target = B;
+
+    fn deref(&self) -> &Self::Target {
+        &self.backend
     }
 }
 
@@ -676,14 +661,15 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
     }
 
     fn exec_undo(&mut self, d: Undo<C>) -> Result<()> {
-        Ok(match d {
+        match d {
             Undo::Ref(r, id) => {
                 self.writer.set_ref(r, id)?;
             }
             Undo::Move { id, to } => {
                 self.move_node(id, to)?;
             }
-        })
+        };
+        Ok(())
     }
 
     fn undo_op(&mut self, log: LogOp<M, C>) -> Result<Op<M, C>> {
@@ -697,24 +683,20 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
     pub fn apply(&mut self, ops: Vec<Op<M, C>>) -> Result<&mut Self> {
         let mut redo_queue = Vec::new();
         if let Some(first_op) = ops.first() {
-            loop {
-                if let Some(last) = self.writer.pop_log()? {
-                    match first_op.marker.partial_cmp(&last.op.marker) {
-                        None | Some(Ordering::Equal) => {
-                            return Err(Error::InvalidOp(
+            while let Some(last) = self.writer.pop_log()? {
+                match first_op.marker.partial_cmp(&last.op.marker) {
+                    None | Some(Ordering::Equal) => {
+                        return Err(Error::InvalidOp(
                                 "The marker of the operation has duplicates. Every op must have a unique timestamp.".to_string(),
                             ));
-                        }
-                        Some(Ordering::Less) => {
-                            redo_queue.push(self.undo_op(last)?);
-                        }
-                        Some(Ordering::Greater) => {
-                            self.writer.push_log(last)?;
-                            break;
-                        }
                     }
-                } else {
-                    break;
+                    Some(Ordering::Less) => {
+                        redo_queue.push(self.undo_op(last)?);
+                    }
+                    Some(Ordering::Greater) => {
+                        self.writer.push_log(last)?;
+                        break;
+                    }
                 }
             }
         }
@@ -736,7 +718,6 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
                         Some(Ordering::Greater) => {
                             let redo_log_op: LogOp<M, C> = self.do_op(redo)?;
                             self.writer.push_log(redo_log_op)?;
-                            break;
                         }
                     }
                 } else {
@@ -757,6 +738,16 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
     pub fn commit(self) -> Result<()> {
         self.writer.commit()?;
         Ok(())
+    }
+}
+
+impl<'a, M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> std::ops::Deref
+    for TrieUpdater<'a, M, C, B>
+{
+    type Target = B::Writer<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writer
     }
 }
 

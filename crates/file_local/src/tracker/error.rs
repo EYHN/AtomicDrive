@@ -1,6 +1,7 @@
 use std::fmt;
 
 #[derive(Clone, Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum Error {
     RocksdbError(rocksdb::Error),
     EncodeError(String),

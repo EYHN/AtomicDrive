@@ -27,6 +27,7 @@ impl PartialOrd for VIndexRegMarker {
     }
 }
 
+#[allow(clippy::upper_case_acronyms)]
 type LWW<IndexedObject> = LWWReg<IndexedObject, VIndexRegMarker>;
 
 #[derive(Debug, Default, Hash, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -70,12 +71,10 @@ impl<IndexedObject: PartialEq> PartialOrd for VIndexReg<IndexedObject> {
             } else {
                 Some(std::cmp::Ordering::Greater)
             }
+        } else if other.lww.is_some() {
+            Some(std::cmp::Ordering::Less)
         } else {
-            if let Some(_) = other.lww {
-                Some(std::cmp::Ordering::Less)
-            } else {
-                Some(std::cmp::Ordering::Equal)
-            }
+            Some(std::cmp::Ordering::Equal)
         }
     }
 }
@@ -86,10 +85,10 @@ impl<IndexedObject: PartialEq> CvRDT for VIndexReg<IndexedObject> {
     fn validate_merge(&self, other: &Self) -> Result<(), Self::Validation> {
         if let Some(lww) = self.lww.as_ref() {
             if let Some(other) = other.lww.as_ref() {
-                return lww.validate_merge(&other);
+                return lww.validate_merge(other);
             }
         }
-        return Ok(());
+        Ok(())
     }
 
     fn merge(&mut self, other: Self) {
@@ -97,10 +96,8 @@ impl<IndexedObject: PartialEq> CvRDT for VIndexReg<IndexedObject> {
             if let Some(other) = other.lww {
                 lww.merge(other);
             }
-        } else {
-            if let Some(other) = other.lww {
-                self.lww = Some(other);
-            }
+        } else if let Some(other) = other.lww {
+            self.lww = Some(other);
         }
     }
 }
@@ -124,16 +121,14 @@ impl<IndexedObject: PartialEq> CmRDT for VIndexReg<IndexedObject> {
             if let Some(op) = op.lww {
                 lww.apply(op)
             }
-        } else {
-            if let Some(op) = op.lww {
-                self.lww = Some(op)
-            }
+        } else if let Some(op) = op.lww {
+            self.lww = Some(op)
         }
     }
 }
 
 impl<A: Ord, IndexedObject> ResetRemove<A> for VIndexReg<IndexedObject> {
-    fn reset_remove(&mut self, clock: &crdts::VClock<A>) {
+    fn reset_remove(&mut self, _clock: &crdts::VClock<A>) {
         // not need
     }
 }

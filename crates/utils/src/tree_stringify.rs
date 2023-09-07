@@ -20,7 +20,7 @@ pub fn tree_stringify<
 
     for entity in entities.iter() {
         let (path, content) = entity;
-        let parts: Vec<_> = path.split(pat).filter(|part| part.len() > 0).collect();
+        let parts: Vec<_> = path.split(pat).filter(|part| !part.is_empty()).collect();
 
         let mut current_stack: Vec<usize> = vec![];
         for (i, part) in parts.iter().enumerate() {
@@ -73,10 +73,10 @@ pub fn tree_stringify<
 
             if count == i + 1 {
                 str.push_str(&format!("{}└ {}{}\n", new_prefix, key, output_content));
-                new_prefix.push_str(" ");
+                new_prefix.push(' ');
             } else {
                 str.push_str(&format!("{}├ {}{}\n", new_prefix, key, output_content));
-                new_prefix.push_str("│");
+                new_prefix.push('│');
             }
 
             if !entry.children.is_empty() {
@@ -87,7 +87,7 @@ pub fn tree_stringify<
         str
     }
 
-    return output_tree_children(Default::default(), tree, "", pat);
+    output_tree_children(Default::default(), tree, "", pat)
 }
 
 #[cfg(test)]

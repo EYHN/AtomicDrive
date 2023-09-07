@@ -1,9 +1,4 @@
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    thread::{self, JoinHandle, Thread},
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, thread::JoinHandle, time::Duration};
 
 use chunk::HashChunks;
 use crdts::CmRDT;
@@ -69,9 +64,9 @@ impl SyncingApp {
 
 impl eframe::App for SyncingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::Window::new("drive1").show(&ctx, |ui| self.drive.debug_ui(ui));
-        egui::Window::new("drive2").show(&ctx, |ui| self.drive2.debug_ui(ui));
-        egui::Window::new("merged").show(&ctx, |ui| {
+        egui::Window::new("drive1").show(ctx, |ui| self.drive.debug_ui(ui));
+        egui::Window::new("drive2").show(ctx, |ui| self.drive2.debug_ui(ui));
+        egui::Window::new("merged").show(ctx, |ui| {
             ui.text_edit_multiline(&mut tree_stringify(self.vindex.lock().iter(), "/"));
         });
     }

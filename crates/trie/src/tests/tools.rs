@@ -1,14 +1,11 @@
-use std::{borrow::Borrow, collections::VecDeque};
+use std::collections::VecDeque;
 
 use crdts::{CmRDT, VClock};
 use utils::PathTools;
 
-use crate::{
-    backend::{memory::TrieMemoryBackend, TrieBackend},
-    ROOT,
-};
+use crate::backend::{memory::TrieMemoryBackend, TrieBackend};
 
-use crate::{Op, Trie, TrieId, TrieKey, TrieRef};
+use crate::{Op, Trie, TrieKey, TrieRef};
 
 #[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub struct Marker {
@@ -45,12 +42,12 @@ pub struct End {
 
 impl End {
     pub fn new(a: u64) -> Self {
-        return End {
+        End {
             actor: a,
             clock: Default::default(),
             time: 0,
             trie: Trie::new(TrieMemoryBackend::default()),
-        };
+        }
     }
 
     pub fn clone_as(&self, a: u64) -> Self {
@@ -63,110 +60,99 @@ impl End {
         let mut result = VecDeque::new();
         for log in self.trie.backend.iter_log().unwrap() {
             let log = log.unwrap();
-            let log_dot = log.op.marker.clock.dot(log.op.marker.actor.clone());
-            if log_dot > after.dot(log_dot.actor.clone()) {
+            let log_dot = log.op.marker.clock.dot(log.op.marker.actor);
+            if log_dot > after.dot(log_dot.actor) {
                 result.push_front(log.op.clone())
             }
         }
 
-        return result.into_iter().collect();
+        result.into_iter().collect()
     }
 
     pub fn sync_with(&mut self, other: &mut Self) {
         let other_ops = other.ops_after(&self.clock);
-        self.apply(other_ops);
-
-        let self_ops = self.ops_after(&other.clock);
-        other.apply(self_ops);
-    }
-
-    pub fn apply(&mut self, ops: Vec<Op<Marker, String>>) {
-        for op in ops.iter() {
-            self.clock
-                .apply(op.marker.clock.dot(op.marker.actor.clone()))
+        for op in other_ops.iter() {
+            self.clock.apply(op.marker.clock.dot(op.marker.actor))
         }
         let mut writer = self.trie.write().unwrap();
 
-        writer.apply(ops).unwrap();
+        writer.apply(other_ops).unwrap();
+        writer.commit().unwrap();
+
+        let self_ops = self.ops_after(&other.clock);
+        for op in self_ops.iter() {
+            other.clock.apply(op.marker.clock.dot(op.marker.actor))
+        }
+        let mut writer = other.trie.write().unwrap();
+
+        writer.apply(self_ops).unwrap();
         writer.commit().unwrap();
     }
 
-    pub fn get_id(&self, path: &str) -> TrieId {
-        let mut id = ROOT;
-        if path != "/" {
-            for part in path.split('/').skip(1) {
-                id = self
-                    .trie
-                    .get_child(id, TrieKey(part.to_string()))
-                    .unwrap()
-                    .unwrap()
-            }
-        }
-
-        id
-    }
-
-    pub fn get_ref(&self, path: &str) -> TrieRef {
-        let id = self.get_id(path);
-        self.trie
-            .get_refs(id)
+    pub fn rename(&mut self, from: &str, to: &str) {
+        let mut writer = self.trie.write().unwrap();
+        let content = writer.get_by_path(from).unwrap().unwrap().content.clone();
+        let from = writer
+            .get_refs_by_path(from)
             .unwrap()
             .unwrap()
             .next()
             .unwrap()
-            .borrow()
-            .to_owned()
-    }
-
-    pub fn get_content(&self, path: &str) -> String {
-        let id = self.get_id(path);
-        self.trie
-            .get(id)
-            .unwrap()
-            .unwrap()
-            .borrow()
-            .content
-            .to_owned()
-    }
-
-    pub fn rename(&mut self, from: &str, to: &str) {
-        let content = self.get_content(from);
-        let from = self.get_ref(from);
+            .clone();
         let filename = PathTools::basename(to).to_owned();
-        let to = self.get_ref(PathTools::dirname(to));
+        let to = writer
+            .get_refs_by_path(PathTools::dirname(to))
+            .unwrap()
+            .unwrap()
+            .next()
+            .unwrap()
+            .clone();
 
-        self.clock.apply(self.clock.inc(self.actor.clone()));
+        self.clock.apply(self.clock.inc(self.actor));
 
-        self.apply(vec![Op {
-            marker: Marker {
-                actor: self.actor.clone(),
-                clock: self.clock.clone(),
-                time: self.time,
-            },
-            parent_ref: to,
-            child_key: TrieKey(filename),
-            child_ref: from,
-            child_content: content,
-        }])
+        writer
+            .apply(vec![Op {
+                marker: Marker {
+                    actor: self.actor,
+                    clock: self.clock.clone(),
+                    time: self.time,
+                },
+                parent_ref: to,
+                child_key: TrieKey(filename),
+                child_ref: from,
+                child_content: content,
+            }])
+            .unwrap();
+        writer.commit().unwrap();
     }
 
     pub fn write(&mut self, to: &str, data: &str) {
         let filename = PathTools::basename(to).to_owned();
-        let to = self.get_ref(PathTools::dirname(to));
+        let mut writer = self.trie.write().unwrap();
+        let to = writer
+            .get_refs_by_path(PathTools::dirname(to))
+            .unwrap()
+            .unwrap()
+            .next()
+            .unwrap()
+            .clone();
 
-        self.clock.apply(self.clock.inc(self.actor.clone()));
+        self.clock.apply(self.clock.inc(self.actor));
 
-        self.apply(vec![Op {
-            marker: Marker {
-                actor: self.actor.clone(),
-                clock: self.clock.clone(),
-                time: self.time,
-            },
-            parent_ref: to,
-            child_key: TrieKey(filename),
-            child_ref: TrieRef::new(),
-            child_content: data.to_owned(),
-        }])
+        writer
+            .apply(vec![Op {
+                marker: Marker {
+                    actor: self.actor,
+                    clock: self.clock.clone(),
+                    time: self.time,
+                },
+                parent_ref: to,
+                child_key: TrieKey(filename),
+                child_ref: TrieRef::new(),
+                child_content: data.to_owned(),
+            }])
+            .unwrap();
+        writer.commit().unwrap();
     }
 
     pub fn mkdir(&mut self, to: &str) {

@@ -42,7 +42,7 @@ pub struct LocalFileSystemConfiguration {
 pub struct LocalFileSystem {
     configuration: Arc<LocalFileSystemConfiguration>,
     operator: Arc<LocalFileSystemOperator>,
-    tracker: Arc<Mutex<tracker::LocalFileSystemTracker>>,
+    pub tracker: Arc<Mutex<tracker::LocalFileSystemTracker>>,
 }
 
 impl LocalFileSystem {
@@ -59,7 +59,7 @@ impl LocalFileSystem {
         Self {
             configuration: configuration.clone(),
             operator: Arc::new(LocalFileSystemOperator {
-                configuration: configuration,
+                configuration,
                 tracker: tracker.clone(),
             }),
             tracker,
@@ -81,6 +81,9 @@ impl LocalFileSystem {
         std::fs::read(self.operator.convert_fspath(path)).unwrap()
     }
 
+    /// # Safety
+    ///
+    /// This function is unsafe.
     pub unsafe fn map_file(&self, path: FileFullPath) -> Mmap {
         let file = std::fs::File::open(self.operator.convert_fspath(path)).unwrap();
 
@@ -110,7 +113,7 @@ impl LocalFileSystemOperator {
             walker.start_new_walking();
             for item in walker.iter() {
                 if let Ok((Some(item_path), item)) =
-                    item.map(|i| (self.convert_vpath(&i.path()), i))
+                    item.map(|i| (self.convert_vpath(i.path()), i))
                 {
                     let new_events = tracker
                         .index(match item {
@@ -165,8 +168,8 @@ impl LocalFileSystemOperator {
         events
     }
 
-    fn write_file(&self, path: FileFullPath, stats: FileStats, content: &[u8]) {
-        let tracker = self.tracker.lock();
+    fn _write_file(&self, path: FileFullPath, _stats: FileStats, _content: &[u8]) {
+        let _tracker = self.tracker.lock();
 
         let dirname = PathTools::dirname(path.as_ref());
 
@@ -203,6 +206,7 @@ impl LocalFileSystemOperator {
         // .split(PathTools::DIRECTORY_SEPARATOR_CHAR) {
 
         // }
+        todo!()
     }
 
     fn stat(&self, path: FileFullPath) -> FileStats {
