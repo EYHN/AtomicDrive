@@ -649,6 +649,19 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<
     }
 }
 
+impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieRocksBackend<M, C> {
+    pub fn write_extra_transaction<'db>(
+        &self,
+        db: rocksdb::Transaction<'db, OptimisticTransactionDB>,
+    ) -> TrieRocksBackendWriter<'db, M, C> {
+        TrieRocksBackendWriter {
+            transaction: db,
+            m: Default::default(),
+            c: Default::default(),
+        }
+    }
+}
+
 pub struct TrieRocksBackendWriter<'db, M: TrieMarker, C: TrieContent> {
     transaction: rocksdb::Transaction<'db, OptimisticTransactionDB>,
     m: PhantomData<M>,

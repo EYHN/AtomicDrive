@@ -3,6 +3,8 @@ pub mod rocks;
 
 use std::borrow::Borrow;
 
+use utils::PathTools;
+
 use crate::{
     Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef, ROOT,
 };
@@ -48,8 +50,7 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
 
     fn get_ensure(&self, id: TrieId) -> Result<Self::Get<'_>> {
         self.get(id)?
-            .ok_or_else(|| 
-                Error::TreeBroken(format!("Trie id {id} not found")))
+            .ok_or_else(|| Error::TreeBroken(format!("Trie id {id} not found")))
     }
 
     fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
@@ -69,7 +70,7 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
     fn get_id_by_path(&self, path: &str) -> Result<Option<TrieId>> {
         let mut id = ROOT;
         if path != "/" {
-            for part in path.split('/').skip(1) {
+            for part in PathTools::parts(path) {
                 if let Some(child_id) = self.get_child(id, TrieKey(part.to_string()))? {
                     id = child_id
                 } else {
@@ -81,10 +82,7 @@ pub trait TrieBackend<M: TrieMarker, C: TrieContent> {
         Ok(Some(id))
     }
 
-    fn get_refs_by_path(
-        &self,
-        path: &str,
-    ) -> Result<Option<Self::GetRefs<'_>>> {
+    fn get_refs_by_path(&self, path: &str) -> Result<Option<Self::GetRefs<'_>>> {
         self.get_id_by_path(path).and_then(|id| {
             if let Some(id) = id {
                 self.get_refs(id)

@@ -1,34 +1,32 @@
 use std::fmt::Debug;
 
+use chunk::HashChunks;
 use crdts::{
     ctx::{AddCtx, ReadCtx, RmCtx},
     CmRDT, Dot, VClock,
 };
 use libp2p::PeerId;
-
-use crate::VIndexReg;
+use trie::{backend::memory::TrieMemoryBackend, Trie};
 
 #[derive(
     Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-pub struct IndexPeerId {
+pub struct VIndexMarker {
+    clock: VClock<PeerId>,
+    timestamp: u64,
     peer_id: PeerId,
 }
 
-impl From<PeerId> for IndexPeerId {
-    fn from(value: PeerId) -> Self {
-        Self { peer_id: value }
-    }
+enum VIndexContent {
+    HashChunks(HashChunks),
+    Directory
 }
 
-type IndexMap<IndexedObject> = crdts::Map<String, VIndexReg<IndexedObject>, IndexPeerId>;
-type IndexMapOp<IndexedObject> = <IndexMap<IndexedObject> as CmRDT>::Op;
-
-type VIndexOp<IndexedObject> = (Dot<IndexPeerId>, IndexMapOp<IndexedObject>);
+type VIndexTrie = Trie<VIndexMarker, VIndexContent, TrieMemoryBackend<VIndexMarker, VIndexContent>>;
 
 #[derive(Debug, Clone, Default)]
 pub struct VIndex<IndexedObject: Clone + Default + Debug + PartialEq> {
-    map: IndexMap<IndexedObject>,
+    map: VIndexTrie,
     clock: VClock<IndexPeerId>,
     ops: Vec<VIndexOp<IndexedObject>>,
 }
@@ -68,7 +66,11 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
         }
     }
 
-    pub fn rm(&self, key: impl Into<String>, add_ctx: AddCtx<IndexPeerId>) -> VIndexOp<IndexedObject> {
+    pub fn rm(
+        &self,
+        key: impl Into<String>,
+        add_ctx: AddCtx<IndexPeerId>,
+    ) -> VIndexOp<IndexedObject> {
         (
             add_ctx.dot,
             self.map.rm(
@@ -95,7 +97,8 @@ impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
     pub fn ops_after(&self, after: &VClock<IndexPeerId>) -> Vec<VIndexOp<IndexedObject>> {
         self.ops
             .iter()
-            .filter(|(dot, _)| dot > &after.dot(dot.actor)).cloned()
+            .filter(|(dot, _)| dot > &after.dot(dot.actor))
+            .cloned()
             .collect()
     }
 

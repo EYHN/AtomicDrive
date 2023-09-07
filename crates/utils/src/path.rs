@@ -425,6 +425,14 @@ impl PathTools {
 
         positions.into_iter().map(|i| &path[0..i])
     }
+
+    pub fn parts(path: &str) -> impl Iterator<Item = &str> {
+        if path.starts_with(Self::DIRECTORY_SEPARATOR_CHAR) {
+            path.split(Self::DIRECTORY_SEPARATOR_CHAR).skip(1)
+        } else {
+            path.split(Self::DIRECTORY_SEPARATOR_CHAR).skip(0)
+        }
+    }
 }
 
 #[cfg(test)]

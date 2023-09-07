@@ -531,9 +531,7 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> Trie<M, C, B> {
     }
 }
 
-impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> std::ops::Deref
-    for Trie<M, C, B>
-{
+impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> std::ops::Deref for Trie<M, C, B> {
     type Target = B;
 
     fn deref(&self) -> &Self::Target {
@@ -700,6 +698,7 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
                 }
             }
         }
+
         for op in ops {
             loop {
                 if let Some(redo) = redo_queue.pop() {
@@ -727,6 +726,7 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
                 }
             }
         }
+
         for redo in redo_queue.into_iter().rev() {
             let redo_log_op: LogOp<M, C> = self.do_op(redo)?;
             self.writer.push_log(redo_log_op)?;
