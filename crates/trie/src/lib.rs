@@ -1,12 +1,11 @@
 pub mod backend;
 
-use std::{borrow::Borrow, cmp::Ordering, fmt::Display, marker::PhantomData, ops::Deref};
+use std::{borrow::Borrow, cmp::Ordering, fmt::Display, marker::PhantomData};
 
 use backend::{TrieBackend, TrieBackendWriter};
-use sha2::Digest;
 use std::fmt::Debug;
 use thiserror::Error;
-use utils::tree_stringify;
+use utils::{tree_stringify, Deserialize, Digestible, Serialize};
 use uuid::Uuid;
 
 use std::hash::Hash;
@@ -29,88 +28,11 @@ pub enum TrieDiff {
     Moved(Option<TrieId>, Option<TrieId>),
 }
 
-pub trait TrieContent: Clone + Hash + Default {
-    fn digest(&self, d: &mut impl Digest);
-}
-
-impl TrieContent for String {
-    fn digest(&self, d: &mut impl Digest) {
-        d.update(self.as_bytes())
-    }
-}
-
-impl TrieContent for u64 {
-    fn digest(&self, d: &mut impl Digest) {
-        d.update(self.to_be_bytes())
-    }
-}
+pub trait TrieContent: Clone + Hash + Default + Digestible {}
+impl<T: Clone + Hash + Default + Digestible> TrieContent for T {}
 
 pub trait TrieMarker: PartialOrd + Clone + Hash {}
 impl<A: PartialOrd + Clone + Hash> TrieMarker for A {}
-
-pub trait TrieSerialize: Clone + Sized {
-    fn write_to_bytes(&self, bytes: Vec<u8>) -> Vec<u8>;
-
-    fn from_bytes(bytes: &[u8]) -> Result<Self>;
-
-    fn write_to_bytes_with_u32_be_header(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes.extend_from_slice(&0_u32.to_be_bytes());
-        let start = bytes.len();
-        bytes = self.write_to_bytes(bytes);
-        let size = ((bytes.len() - start) as u32).to_be_bytes();
-        bytes[start - 4] = size[0];
-        bytes[start - 3] = size[1];
-        bytes[start - 2] = size[2];
-        bytes[start - 1] = size[3];
-
-        bytes
-    }
-
-    fn parse_from_buffer(bytes: &[u8], size: usize) -> Result<(Self, &[u8])> {
-        if bytes.len() < size {
-            return Err(Error::DecodeError(format!("Failed to decode: {bytes:?}")));
-        }
-        let (value, rest) = bytes.split_at(size);
-        let value = Self::from_bytes(value)?;
-
-        Ok((value, rest))
-    }
-
-    fn parse_from_buffer_with_u32_be_header(bytes: &[u8]) -> Result<(Self, &[u8])> {
-        let key_lens = u32::from_be_bytes(
-            bytes[0..4]
-                .try_into()
-                .map_err(|_| Error::DecodeError(format!("Failed to decode: {bytes:?}")))?,
-        ) as usize;
-
-        Self::parse_from_buffer(&bytes[4..], key_lens)
-    }
-}
-
-impl TrieSerialize for String {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes.extend_from_slice(self.as_bytes());
-        bytes
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        Self::from_utf8(bytes.to_vec())
-            .map_err(|_| Error::DecodeError(format!("Failed to decode content: {bytes:?}")))
-    }
-}
-
-impl TrieSerialize for u64 {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes.extend_from_slice(&self.to_be_bytes());
-        bytes
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        Ok(Self::from_be_bytes(bytes.try_into().map_err(|_| {
-            Error::DecodeError(format!("Failed to decode content: {bytes:?}"))
-        })?))
-    }
-}
 
 pub const ROOT: TrieId = TrieId(0u64.to_be_bytes());
 pub const CONFLICT: TrieId = TrieId(1u64.to_be_bytes());
@@ -139,16 +61,20 @@ impl TrieId {
     }
 }
 
-impl TrieSerialize for TrieId {
+impl Serialize for TrieId {
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes.extend_from_slice(self.as_bytes());
         bytes
     }
+}
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        Ok(Self::from(u64::from_be_bytes(bytes.try_into().map_err(
-            |_| Error::DecodeError(format!("Failed to decode id: {bytes:?}")),
-        )?)))
+impl Deserialize for TrieId {
+    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
+        Ok(Self::from(u64::from_be_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| format!("Failed to decode id: {bytes:?}"))?,
+        )))
     }
 }
 
@@ -168,16 +94,19 @@ impl TrieKey {
     }
 }
 
-impl TrieSerialize for TrieKey {
+impl Serialize for TrieKey {
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes.extend_from_slice(self.as_bytes());
         bytes
     }
+}
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        Ok(Self::from(String::from_utf8(bytes.to_vec()).map_err(
-            |_| Error::DecodeError(format!("Failed to decode key: {bytes:?}")),
-        )?))
+impl Deserialize for TrieKey {
+    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
+        Ok(Self::from(
+            String::from_utf8(bytes.to_vec())
+                .map_err(|_| format!("Failed to decode key: {bytes:?}"))?,
+        ))
     }
 }
 
@@ -207,15 +136,17 @@ impl TrieRef {
     }
 }
 
-impl TrieSerialize for TrieRef {
+impl Serialize for TrieRef {
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes.extend_from_slice(self.as_bytes());
         bytes
     }
+}
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+impl Deserialize for TrieRef {
+    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
         Ok(Self::from(u128::from_be_bytes(bytes.try_into().map_err(
-            |_| Error::DecodeError(format!("Failed to decode ref: {bytes:?}")),
+            |_| format!("Failed to decode ref: {bytes:?}"),
         )?)))
     }
 }
@@ -249,15 +180,17 @@ impl TrieHash {
     }
 }
 
-impl TrieSerialize for TrieHash {
+impl Serialize for TrieHash {
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes.extend_from_slice(self.as_bytes());
         bytes
     }
+}
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+impl Deserialize for TrieHash {
+    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
         Ok(Self(bytes.try_into().map_err(|_| {
-            Error::DecodeError(format!("Failed to decode hash: {bytes:?}"))
+            format!("Failed to decode hash: {bytes:?}")
         })?))
     }
 }
@@ -288,15 +221,17 @@ pub struct TrieNode<C: TrieContent> {
     pub content: C,
 }
 
-impl<C: TrieContent + TrieSerialize> TrieSerialize for TrieNode<C> {
+impl<C: TrieContent + Serialize> Serialize for TrieNode<C> {
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes = self.parent.write_to_bytes(bytes);
         bytes = self.key.write_to_bytes_with_u32_be_header(bytes);
         bytes = self.content.write_to_bytes(bytes);
         bytes
     }
+}
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+impl<C: TrieContent + Deserialize> Deserialize for TrieNode<C> {
+    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
         let (parent, bytes) = TrieId::parse_from_buffer(bytes, 8)?;
         let (key, bytes) = TrieKey::parse_from_buffer_with_u32_be_header(bytes)?;
         let content = C::from_bytes(bytes)?;
@@ -327,7 +262,7 @@ pub enum Undo<C: TrieContent> {
     },
 }
 
-impl<C: TrieContent + TrieSerialize> TrieSerialize for Undo<C> {
+impl<C: TrieContent + Serialize> Serialize for Undo<C> {
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         match self {
             Undo::Ref(r, id) => {
@@ -350,8 +285,10 @@ impl<C: TrieContent + TrieSerialize> TrieSerialize for Undo<C> {
             }
         }
     }
+}
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+impl<C: TrieContent + Deserialize> Deserialize for Undo<C> {
+    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
         match bytes[0] {
             b'r' => {
                 let (r, bytes) = TrieRef::parse_from_buffer(&bytes[1..], 16)?;
@@ -375,9 +312,7 @@ impl<C: TrieContent + TrieSerialize> TrieSerialize for Undo<C> {
                 };
                 Ok(Undo::Move { id, to })
             }
-            _ => Err(Error::DecodeError(format!(
-                "Failed to decode undo: {bytes:?}"
-            ))),
+            _ => Err(format!("Failed to decode undo: {bytes:?}")),
         }
     }
 }
@@ -391,7 +326,7 @@ pub struct Op<M: TrieMarker, C: TrieContent> {
     pub child_content: C,
 }
 
-impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieSerialize for Op<M, C> {
+impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for Op<M, C> {
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes = self.parent_ref.write_to_bytes(bytes);
         bytes = self.child_key.write_to_bytes_with_u32_be_header(bytes);
@@ -400,8 +335,10 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieSerializ
         bytes = self.child_content.write_to_bytes(bytes);
         bytes
     }
+}
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+impl<M: TrieMarker + Deserialize, C: TrieContent + Deserialize> Deserialize for Op<M, C> {
+    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
         let (parent_ref, bytes) = TrieRef::parse_from_buffer(bytes, 16)?;
         let (child_key, bytes) = TrieKey::parse_from_buffer_with_u32_be_header(bytes)?;
         let (child_ref, bytes) = TrieRef::parse_from_buffer(bytes, 16)?;
@@ -424,7 +361,7 @@ pub struct LogOp<M: TrieMarker, C: TrieContent> {
     pub undos: Vec<Undo<C>>,
 }
 
-impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieSerialize for LogOp<M, C> {
+impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for LogOp<M, C> {
     fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes = self.op.write_to_bytes_with_u32_be_header(bytes);
         for undo in self.undos.iter() {
@@ -432,8 +369,10 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieSerializ
         }
         bytes
     }
+}
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+impl<M: TrieMarker + Deserialize, C: TrieContent + Deserialize> Deserialize for LogOp<M, C> {
+    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
         let (op, bytes) = Op::<M, C>::parse_from_buffer_with_u32_be_header(bytes)?;
         let mut undos = vec![];
 

@@ -1,10 +1,11 @@
 use std::marker::PhantomData;
 
 use rocksdb::{DBAccess, OptimisticTransactionDB, Transaction};
+use utils::{Deserialize, Serialize};
 
 use crate::{
-    Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef,
-    TrieSerialize, CONFLICT, ROOT,
+    Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef, CONFLICT,
+    ROOT,
 };
 
 use super::{TrieBackend, TrieBackendWriter};
@@ -77,17 +78,23 @@ impl Keys {
         let args = &args[1..];
 
         match label {
-            b"r" => Ok(Self::RefIdIndex(TrieRef::from_bytes(args)?)),
-            b"n" => Ok(Self::NodeInfo(TrieId::from_bytes(args)?)),
+            b"r" => Ok(Self::RefIdIndex(
+                TrieRef::from_bytes(args).map_err(Error::DecodeError)?,
+            )),
+            b"n" => Ok(Self::NodeInfo(
+                TrieId::from_bytes(args).map_err(Error::DecodeError)?,
+            )),
             b"c" => {
                 let (id, key) = args.split_at(8);
 
                 Ok(Self::NodeChild(
-                    TrieId::from_bytes(id)?,
-                    TrieKey::from_bytes(&key[1..])?,
+                    TrieId::from_bytes(id).map_err(Error::DecodeError)?,
+                    TrieKey::from_bytes(&key[1..]).map_err(Error::DecodeError)?,
                 ))
             }
-            b"i" => Ok(Self::IdRefsIndex(TrieId::from_bytes(args)?)),
+            b"i" => Ok(Self::IdRefsIndex(
+                TrieId::from_bytes(args).map_err(Error::DecodeError)?,
+            )),
             b"auto_increment_id" => Ok(Self::AutoIncrementId),
             b"log_total_length" => Ok(Self::LogTotalLength),
             b"l" => Ok(Self::Log(u64::from_be_bytes(
@@ -148,7 +155,7 @@ mod keys_tests {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Values<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> {
+enum Values<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize> {
     RefIdIndex(TrieId),
     NodeInfo(TrieNode<C>),
     NodeChild(TrieId),
@@ -158,7 +165,9 @@ enum Values<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> {
     Log(LogOp<M, C>),
 }
 
-impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> Values<M, C> {
+impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
+    Values<M, C>
+{
     fn value_type(&self) -> &'static str {
         match self {
             Values::RefIdIndex(_) => "RefIdIndex",
@@ -198,24 +207,34 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> Values<M, C>
     fn parse(key: &Keys, bytes: &[u8]) -> Result<Self> {
         let error = || Error::DecodeError(format!("Failed to decode value: {bytes:?}"));
         Ok(match key {
-            Keys::RefIdIndex(_) => Self::RefIdIndex(TrieId::from_bytes(bytes)?),
-            Keys::NodeInfo(_) => Self::NodeInfo(TrieNode::<C>::from_bytes(bytes)?),
-            Keys::NodeChild(_, _) => Self::NodeChild(TrieId::from_bytes(bytes)?),
+            Keys::RefIdIndex(_) => {
+                Self::RefIdIndex(TrieId::from_bytes(bytes).map_err(Error::DecodeError)?)
+            }
+            Keys::NodeInfo(_) => {
+                Self::NodeInfo(TrieNode::<C>::from_bytes(bytes).map_err(Error::DecodeError)?)
+            }
+            Keys::NodeChild(_, _) => {
+                Self::NodeChild(TrieId::from_bytes(bytes).map_err(Error::DecodeError)?)
+            }
             Keys::IdRefsIndex(_) => {
                 let mut refs = vec![];
                 for r in bytes.chunks(16) {
-                    refs.push(TrieRef::from_bytes(r)?)
+                    refs.push(TrieRef::from_bytes(r).map_err(Error::DecodeError)?)
                 }
                 Self::IdRefsIndex(refs)
             }
             Keys::NodeChildren(_) => {
                 panic!("Keys::NodeChildren not have value format")
             }
-            Keys::AutoIncrementId => Self::AutoIncrementId(TrieId::from_bytes(bytes)?),
+            Keys::AutoIncrementId => {
+                Self::AutoIncrementId(TrieId::from_bytes(bytes).map_err(Error::DecodeError)?)
+            }
             Keys::LogTotalLength => {
                 Self::LogTotalLength(u64::from_be_bytes(bytes.try_into().map_err(|_| error())?))
             }
-            Keys::Log(_) => Self::Log(LogOp::<M, C>::from_bytes(bytes)?),
+            Keys::Log(_) => {
+                Self::Log(LogOp::<M, C>::from_bytes(bytes).map_err(Error::DecodeError)?)
+            }
             Keys::Logs => {
                 panic!("Keys::Logs not have value format")
             }
@@ -399,13 +418,18 @@ mod values_tests {
     }
 }
 
-pub struct TrieRocksBackend<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> {
+pub struct TrieRocksBackend<
+    M: TrieMarker + Serialize + Deserialize,
+    C: TrieContent + Serialize + Deserialize,
+> {
     db: OptimisticTransactionDB,
     m: PhantomData<M>,
     c: PhantomData<C>,
 }
 
-impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieRocksBackend<M, C> {
+impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
+    TrieRocksBackend<M, C>
+{
     pub fn open_or_create_database(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let mut opts = rocksdb::Options::default();
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(11));
@@ -480,8 +504,8 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieRocksBac
 
 pub struct TrieRocksBackendChildrenIter<
     'a,
-    M: TrieMarker + TrieSerialize,
-    C: TrieContent + TrieSerialize,
+    M: TrieMarker + Serialize + Deserialize,
+    C: TrieContent + Serialize + Deserialize,
     D: DBAccess,
 > {
     iter: rocksdb::DBIteratorWithThreadMode<'a, D>,
@@ -491,8 +515,12 @@ pub struct TrieRocksBackendChildrenIter<
     m: PhantomData<M>,
 }
 
-impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize, D: DBAccess> Iterator
-    for TrieRocksBackendChildrenIter<'a, M, C, D>
+impl<
+        'a,
+        M: TrieMarker + Serialize + Deserialize,
+        C: TrieContent + Serialize + Deserialize,
+        D: DBAccess,
+    > Iterator for TrieRocksBackendChildrenIter<'a, M, C, D>
 {
     type Item = Result<(TrieKey, TrieId)>;
 
@@ -518,8 +546,8 @@ impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize, D: DBAcc
 
 pub struct TrieRocksBackendLogIter<
     'a,
-    M: TrieMarker + TrieSerialize,
-    C: TrieContent + TrieSerialize,
+    M: TrieMarker + Serialize + Deserialize,
+    C: TrieContent + Serialize + Deserialize,
     D: DBAccess,
 > {
     iter: rocksdb::DBIteratorWithThreadMode<'a, D>,
@@ -527,8 +555,12 @@ pub struct TrieRocksBackendLogIter<
     m: PhantomData<M>,
 }
 
-impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize, D: DBAccess> Iterator
-    for TrieRocksBackendLogIter<'a, M, C, D>
+impl<
+        'a,
+        M: TrieMarker + Serialize + Deserialize,
+        C: TrieContent + Serialize + Deserialize,
+        D: DBAccess,
+    > Iterator for TrieRocksBackendLogIter<'a, M, C, D>
 {
     type Item = Result<LogOp<M, C>>;
 
@@ -544,8 +576,8 @@ impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize, D: DBAcc
     }
 }
 
-impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<M, C>
-    for TrieRocksBackend<M, C>
+impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
+    TrieBackend<M, C> for TrieRocksBackend<M, C>
 {
     fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
         self.get(Keys::RefIdIndex(r))?
@@ -649,7 +681,9 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<
     }
 }
 
-impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieRocksBackend<M, C> {
+impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
+    TrieRocksBackend<M, C>
+{
     pub fn write_extra_transaction<'db>(
         &self,
         db: rocksdb::Transaction<'db, OptimisticTransactionDB>,
@@ -668,7 +702,7 @@ pub struct TrieRocksBackendWriter<'db, M: TrieMarker, C: TrieContent> {
     c: PhantomData<C>,
 }
 
-impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize>
+impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
     TrieRocksBackendWriter<'_, M, C>
 {
     fn get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
@@ -690,8 +724,8 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize>
     }
 }
 
-impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<M, C>
-    for TrieRocksBackendWriter<'_, M, C>
+impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
+    TrieBackend<M, C> for TrieRocksBackendWriter<'_, M, C>
 {
     fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
         self.get(Keys::RefIdIndex(r))?
@@ -791,8 +825,8 @@ impl<M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackend<
     }
 }
 
-impl<'a, M: TrieMarker + TrieSerialize, C: TrieContent + TrieSerialize> TrieBackendWriter<'a, M, C>
-    for TrieRocksBackendWriter<'a, M, C>
+impl<'a, M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
+    TrieBackendWriter<'a, M, C> for TrieRocksBackendWriter<'a, M, C>
 {
     fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>> {
         let old_id = if let Some(id) = self

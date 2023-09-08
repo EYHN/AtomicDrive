@@ -9,7 +9,7 @@ use libp2p::PeerId;
 use trie::{backend::memory::TrieMemoryBackend, Trie};
 
 #[derive(
-    Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Hash, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 pub struct VIndexMarker {
     clock: VClock<PeerId>,
@@ -27,8 +27,7 @@ type VIndexTrie = Trie<VIndexMarker, VIndexContent, TrieMemoryBackend<VIndexMark
 #[derive(Debug, Clone, Default)]
 pub struct VIndex<IndexedObject: Clone + Default + Debug + PartialEq> {
     map: VIndexTrie,
-    clock: VClock<IndexPeerId>,
-    ops: Vec<VIndexOp<IndexedObject>>,
+    clock: VClock<PeerId>,
 }
 
 impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
