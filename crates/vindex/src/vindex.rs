@@ -7,206 +7,218 @@ use crdts::{
 };
 use libp2p::PeerId;
 use trie::{backend::memory::TrieMemoryBackend, Trie};
+use utils::Digestible;
 
-#[derive(
-    Debug, Hash, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Hash, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VIndexMarker {
     clock: VClock<PeerId>,
     timestamp: u64,
     peer_id: PeerId,
 }
 
-enum VIndexContent {
+impl PartialOrd for VIndexMarker {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        todo!()
+    }
+}
+
+#[derive(Debug, Hash, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum VIndexContent {
     HashChunks(HashChunks),
-    Directory
+    Directory,
+}
+
+impl Digestible for VIndexContent {
+    fn digest(&self, data: &mut impl utils::Digest) {
+        todo!()
+    }
+}
+
+impl Default for VIndexContent {
+    fn default() -> Self {
+        Self::Directory
+    }
 }
 
 type VIndexTrie = Trie<VIndexMarker, VIndexContent, TrieMemoryBackend<VIndexMarker, VIndexContent>>;
 
-#[derive(Debug, Clone, Default)]
-pub struct VIndex<IndexedObject: Clone + Default + Debug + PartialEq> {
-    map: VIndexTrie,
+#[derive(Clone)]
+pub struct VIndex {
+    trie: VIndexTrie,
     clock: VClock<PeerId>,
 }
 
-impl<IndexedObject: Clone + Default + Debug + PartialEq> VIndex<IndexedObject> {
+impl VIndex {
     pub fn write(
-        &self,
-        key: impl Into<String>,
-        object: IndexedObject,
+        &mut self,
+        path: impl Into<String>,
+        object: VIndexContent,
         timestamp: u64,
-        peer_id: IndexPeerId,
-        add_ctx: AddCtx<IndexPeerId>,
-    ) -> VIndexOp<IndexedObject> {
-        (
-            add_ctx.dot,
-            self.map.update(key, add_ctx, |_, add_ctx| {
-                VIndexReg::new(object, add_ctx.clock, timestamp, peer_id)
-            }),
-        )
+        add_ctx: AddCtx<PeerId>,
+    ) {
+        let writer = self.trie.write();
     }
 
-    pub fn read(&self, key: impl Into<String>) -> ReadCtx<Option<IndexedObject>, IndexPeerId> {
-        let read_ctx = self.map.get(&key.into());
+    // pub fn read(&self, key: impl Into<String>) -> ReadCtx<Option<IndexedObject>, IndexPeerId> {
+    //     let read_ctx = self.map.get(&key.into());
 
-        if let Some(reg) = read_ctx.val {
-            ReadCtx {
-                add_clock: read_ctx.add_clock,
-                rm_clock: read_ctx.rm_clock,
-                val: reg.val().cloned(),
-            }
-        } else {
-            ReadCtx {
-                add_clock: read_ctx.add_clock,
-                rm_clock: read_ctx.rm_clock,
-                val: None,
-            }
-        }
-    }
+    //     if let Some(reg) = read_ctx.val {
+    //         ReadCtx {
+    //             add_clock: read_ctx.add_clock,
+    //             rm_clock: read_ctx.rm_clock,
+    //             val: reg.val().cloned(),
+    //         }
+    //     } else {
+    //         ReadCtx {
+    //             add_clock: read_ctx.add_clock,
+    //             rm_clock: read_ctx.rm_clock,
+    //             val: None,
+    //         }
+    //     }
+    // }
 
-    pub fn rm(
-        &self,
-        key: impl Into<String>,
-        add_ctx: AddCtx<IndexPeerId>,
-    ) -> VIndexOp<IndexedObject> {
-        (
-            add_ctx.dot,
-            self.map.rm(
-                key,
-                RmCtx {
-                    clock: add_ctx.clock,
-                },
-            ),
-        )
-    }
+    // pub fn rm(
+    //     &self,
+    //     key: impl Into<String>,
+    //     add_ctx: AddCtx<IndexPeerId>,
+    // ) -> VIndexOp<IndexedObject> {
+    //     (
+    //         add_ctx.dot,
+    //         self.map.rm(
+    //             key,
+    //             RmCtx {
+    //                 clock: add_ctx.clock,
+    //             },
+    //         ),
+    //     )
+    // }
 
-    pub fn read_ctx(&self) -> ReadCtx<(), IndexPeerId> {
-        ReadCtx {
-            add_clock: self.clock.clone(),
-            rm_clock: self.clock.clone(),
-            val: (),
-        }
-    }
+    // pub fn read_ctx(&self) -> ReadCtx<(), IndexPeerId> {
+    //     ReadCtx {
+    //         add_clock: self.clock.clone(),
+    //         rm_clock: self.clock.clone(),
+    //         val: (),
+    //     }
+    // }
 
-    pub fn clock(&self) -> VClock<IndexPeerId> {
-        self.map.read_ctx().add_clock
-    }
+    // pub fn clock(&self) -> VClock<IndexPeerId> {
+    //     self.map.read_ctx().add_clock
+    // }
 
-    pub fn ops_after(&self, after: &VClock<IndexPeerId>) -> Vec<VIndexOp<IndexedObject>> {
-        self.ops
-            .iter()
-            .filter(|(dot, _)| dot > &after.dot(dot.actor))
-            .cloned()
-            .collect()
-    }
+    // pub fn ops_after(&self, after: &VClock<IndexPeerId>) -> Vec<VIndexOp<IndexedObject>> {
+    //     self.ops
+    //         .iter()
+    //         .filter(|(dot, _)| dot > &after.dot(dot.actor))
+    //         .cloned()
+    //         .collect()
+    // }
 
-    pub fn quick_sync(&mut self, other: &mut Self) {
-        let other_ops = other.ops_after(&self.clock());
+    // pub fn quick_sync(&mut self, other: &mut Self) {
+    //     let other_ops = other.ops_after(&self.clock());
 
-        for op in other_ops {
-            self.apply(op);
-        }
+    //     for op in other_ops {
+    //         self.apply(op);
+    //     }
 
-        let self_ops = self.ops_after(&other.clock());
+    //     let self_ops = self.ops_after(&other.clock());
 
-        for op in self_ops {
-            other.apply(op);
-        }
-    }
+    //     for op in self_ops {
+    //         other.apply(op);
+    //     }
+    // }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &IndexedObject)> {
-        self.map.iter().filter_map(|item_ctx| {
-            item_ctx
-                .val
-                .1
-                .val()
-                .map(|val| (item_ctx.val.0.as_str(), val))
-        })
-    }
+    // pub fn iter(&self) -> impl Iterator<Item = (&str, &IndexedObject)> {
+    //     self.map.iter().filter_map(|item_ctx| {
+    //         item_ctx
+    //             .val
+    //             .1
+    //             .val()
+    //             .map(|val| (item_ctx.val.0.as_str(), val))
+    //     })
+    // }
 }
 
-impl<IndexedObject: Clone + Default + Debug + PartialEq> CmRDT for VIndex<IndexedObject> {
-    type Op = VIndexOp<IndexedObject>;
+// impl<IndexedObject: Clone + Default + Debug + PartialEq> CmRDT for VIndex<IndexedObject> {
+//     type Op = VIndexOp<IndexedObject>;
 
-    type Validation = <IndexMap<IndexedObject> as CmRDT>::Validation;
+//     type Validation = <IndexMap<IndexedObject> as CmRDT>::Validation;
 
-    fn validate_op(&self, (_, map_op): &Self::Op) -> Result<(), Self::Validation> {
-        self.map.validate_op(map_op)
-    }
+//     fn validate_op(&self, (_, map_op): &Self::Op) -> Result<(), Self::Validation> {
+//         self.map.validate_op(map_op)
+//     }
 
-    fn apply(&mut self, op: Self::Op) {
-        self.map.apply(op.1.clone());
-        self.clock.apply(op.0);
-        self.ops.push(op);
-    }
-}
+//     fn apply(&mut self, op: Self::Op) {
+//         self.map.apply(op.1.clone());
+//         self.clock.apply(op.0);
+//         self.ops.push(op);
+//     }
+// }
 
-#[cfg(test)]
-mod tests {
-    use crdts::CmRDT;
-    use libp2p::PeerId;
+// #[cfg(test)]
+// mod tests {
+//     use crdts::CmRDT;
+//     use libp2p::PeerId;
 
-    use crate::{IndexPeerId, VIndex};
+//     use crate::{IndexPeerId, VIndex};
 
-    #[test]
-    fn test_index() {
-        let device_1_peer_id = IndexPeerId::from(PeerId::random());
-        let device_2_peer_id = IndexPeerId::from(PeerId::random());
-        let mut device_1 = VIndex::default();
-        device_1.apply(device_1.write(
-            "/path/file",
-            "test",
-            1,
-            device_1_peer_id,
-            device_1.read_ctx().derive_add_ctx(device_1_peer_id),
-        ));
-        let mut device_2 = device_1.clone();
-        device_1.apply(device_1.write(
-            "/path/file",
-            "123",
-            2,
-            device_1_peer_id,
-            device_1.read_ctx().derive_add_ctx(device_1_peer_id),
-        ));
-        device_2.apply(device_2.write(
-            "/path/file",
-            "456",
-            3,
-            device_2_peer_id,
-            device_2.read_ctx().derive_add_ctx(device_2_peer_id),
-        ));
-        device_1.quick_sync(&mut device_2);
+//     #[test]
+//     fn test_index() {
+//         let device_1_peer_id = IndexPeerId::from(PeerId::random());
+//         let device_2_peer_id = IndexPeerId::from(PeerId::random());
+//         let mut device_1 = VIndex::default();
+//         device_1.apply(device_1.write(
+//             "/path/file",
+//             "test",
+//             1,
+//             device_1_peer_id,
+//             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
+//         ));
+//         let mut device_2 = device_1.clone();
+//         device_1.apply(device_1.write(
+//             "/path/file",
+//             "123",
+//             2,
+//             device_1_peer_id,
+//             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
+//         ));
+//         device_2.apply(device_2.write(
+//             "/path/file",
+//             "456",
+//             3,
+//             device_2_peer_id,
+//             device_2.read_ctx().derive_add_ctx(device_2_peer_id),
+//         ));
+//         device_1.quick_sync(&mut device_2);
 
-        assert_eq!(device_1.read("/path/file").val.unwrap(), "456");
-        assert_eq!(device_2.read("/path/file").val.unwrap(), "456");
+//         assert_eq!(device_1.read("/path/file").val.unwrap(), "456");
+//         assert_eq!(device_2.read("/path/file").val.unwrap(), "456");
 
-        device_1.apply(device_1.rm(
-            "/path/file",
-            device_1.read_ctx().derive_add_ctx(device_1_peer_id),
-        ));
+//         device_1.apply(device_1.rm(
+//             "/path/file",
+//             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
+//         ));
 
-        device_2.apply(device_2.write(
-            "/path/file",
-            "789",
-            3,
-            device_2_peer_id,
-            device_2.read_ctx().derive_add_ctx(device_2_peer_id),
-        ));
+//         device_2.apply(device_2.write(
+//             "/path/file",
+//             "789",
+//             3,
+//             device_2_peer_id,
+//             device_2.read_ctx().derive_add_ctx(device_2_peer_id),
+//         ));
 
-        device_2.quick_sync(&mut device_1);
+//         device_2.quick_sync(&mut device_1);
 
-        assert_eq!(device_1.read("/path/file").val, Some("789"));
-        assert_eq!(device_2.read("/path/file").val, Some("789"));
+//         assert_eq!(device_1.read("/path/file").val, Some("789"));
+//         assert_eq!(device_2.read("/path/file").val, Some("789"));
 
-        device_1.apply(device_1.rm(
-            "/path/file",
-            device_1.read_ctx().derive_add_ctx(device_1_peer_id),
-        ));
+//         device_1.apply(device_1.rm(
+//             "/path/file",
+//             device_1.read_ctx().derive_add_ctx(device_1_peer_id),
+//         ));
 
-        device_2.quick_sync(&mut device_1);
+//         device_2.quick_sync(&mut device_1);
 
-        assert_eq!(device_1.read("/path/file").val, None);
-        assert_eq!(device_2.read("/path/file").val, None);
-    }
-}
+//         assert_eq!(device_1.read("/path/file").val, None);
+//         assert_eq!(device_2.read("/path/file").val, None);
+//     }
+// }

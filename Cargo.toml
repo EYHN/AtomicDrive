@@ -6,7 +6,8 @@ members = [
     "./crates/vindex",
     "./crates/sync",
     "./crates/chunk",
-    "./crates/trie"
+    "./crates/trie",
+    "./crates/db"
 ]
 
 [profile.bench]
