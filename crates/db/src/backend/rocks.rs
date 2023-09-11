@@ -1,10 +1,27 @@
 use rocksdb::OptimisticTransactionDB;
 
-use crate::{DBRead, DBTransaction, DBWrite, Error, Result};
+use crate::{DBRead, DBTransaction, DBWrite, Error, Result, DB};
 
 #[derive(Debug)]
 pub struct RocksDB {
     db: OptimisticTransactionDB,
+}
+
+impl RocksDB {
+    pub fn open_or_create_database(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+
+        let db = OptimisticTransactionDB::open(&opts, path)?;
+        Ok(Self { db })
+    }
+
+    pub fn drop_all(&mut self) -> Result<()> {
+        for item in self.db.iterator(rocksdb::IteratorMode::Start) {
+            self.db.delete(item?.0)?;
+        }
+        Ok(())
+    }
 }
 
 pub enum RocksDBBytes<'a> {
@@ -61,6 +78,18 @@ impl DBRead for RocksDB {
             iter,
             check_upper_bound: None,
         }
+    }
+}
+
+impl DB for RocksDB {
+    type Transaction<'a> = RocksDBTransaction<'a>
+    where
+        Self: 'a;
+
+    fn start_transaction(&self) -> Result<Self::Transaction<'_>> {
+        Ok(RocksDBTransaction {
+            transaction: self.db.transaction(),
+        })
     }
 }
 
@@ -134,6 +163,11 @@ impl<'db> DBRead for RocksDBTransaction<'db> {
 impl DBWrite for RocksDBTransaction<'_> {
     fn set(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
         self.transaction.put(key, value)?;
+        Ok(())
+    }
+
+    fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<()> {
+        self.transaction.delete(key)?;
         Ok(())
     }
 }

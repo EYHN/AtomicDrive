@@ -9,9 +9,16 @@ type ValueBytes = Arc<[u8]>;
 
 type MapType = std::collections::BTreeMap<KeyBytes, ValueBytes>;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MemoryDB {
     map: Arc<RwLock<MapType>>,
+}
+
+impl MemoryDB {
+    pub fn drop_all(&mut self) -> Result<()> {
+        self.map.write().clear();
+        Ok(())
+    }
 }
 
 impl DBRead for MemoryDB {
@@ -106,6 +113,13 @@ impl DBWrite for MemoryDBTransaction<'_> {
         let key = key.as_ref().to_vec().into_boxed_slice();
         let old = self.write.insert(key.clone(), Arc::from(value.as_ref()));
         self.rollback.push((key, old));
+        Ok(())
+    }
+
+    fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<()> {
+        let old = self.write.remove(key.as_ref());
+        self.rollback
+            .push((key.as_ref().to_vec().into_boxed_slice(), old));
         Ok(())
     }
 }
