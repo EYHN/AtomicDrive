@@ -20,6 +20,8 @@ pub enum Error {
     DecodeError(String),
     #[error("rocksdb error")]
     RocksdbError(#[from] rocksdb::Error),
+    #[error("db error")]
+    DBError(#[from] db::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

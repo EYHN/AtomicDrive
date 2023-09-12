@@ -1,17 +1,25 @@
 use std::collections::VecDeque;
 
 use crdts::{CmRDT, VClock};
-use utils::PathTools;
+use db::backend::memory::MemoryDB;
+use utils::{PathTools, Serialize};
 
-use crate::backend::{memory::TrieMemoryBackend, TrieBackend};
+use crate::backend::common::TrieDBBackend;
+use crate::backend::TrieBackend;
 
 use crate::{Op, Trie, TrieKey, TrieRef};
 
-#[derive(Debug, Hash, Clone, PartialEq, Eq)]
+#[derive(Debug, Hash, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Marker {
     actor: u64,
     clock: VClock<u64>,
     time: u64,
+}
+
+impl Serialize for Marker {
+    fn write_to_bytes(&self, bytes: Vec<u8>) -> Vec<u8> {
+        todo!()
+    }
 }
 
 impl Ord for Marker {
@@ -37,7 +45,7 @@ pub struct End {
     actor: u64,
     clock: VClock<u64>,
     time: u64,
-    trie: Trie<Marker, String, TrieMemoryBackend<Marker, String>>,
+    trie: Trie<Marker, String, TrieDBBackend<MemoryDB, Marker, String>>,
 }
 
 impl End {
@@ -46,7 +54,7 @@ impl End {
             actor: a,
             clock: Default::default(),
             time: 0,
-            trie: Trie::new(TrieMemoryBackend::default()),
+            trie: Trie::new(TrieDBBackend::n()),
         }
     }
 
