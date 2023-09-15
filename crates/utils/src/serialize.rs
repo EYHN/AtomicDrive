@@ -3,31 +3,22 @@ use std::mem::MaybeUninit;
 pub trait Serialize: Sized {
     fn serialize(&self, bytes: Vec<u8>) -> Vec<u8>;
 
-    // fn write_to_bytes_with_u32_be_header(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-    //     bytes.extend_from_slice(&0_u32.to_be_bytes());
-    //     let start = bytes.len();
-    //     bytes = self.write_to_bytes(bytes);
-    //     let size = ((bytes.len() - start) as u32).to_be_bytes();
-    //     bytes[start - 4] = size[0];
-    //     bytes[start - 3] = size[1];
-    //     bytes[start - 2] = size[2];
-    //     bytes[start - 1] = size[3];
-
-    //     bytes
-    // }
+    /// alias for serialize
+    fn write_to_bytes(&self, bytes: Vec<u8>) -> Vec<u8> {
+        self.serialize(bytes)
+    }
 }
 
 pub trait Deserialize: Sized {
     fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String>;
 
-    // fn parse_from_buffer(bytes: &[u8], size: usize) -> Result<(Self, &[u8]), String> {
-    //     if bytes.len() < size {
-    //         return Err(format!("Failed to decode: {bytes:?}"));
-    //     }
-    //     let (value, rest) = bytes.split_at(size);
-    //     let value = Self::from_bytes(value)?;
+    /// alias for deserialize
+    fn parse_from_bytes(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        Self::deserialize(bytes)
+    }
 
-    //     Ok((value, rest))
+    // fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+    //     panic!()
     // }
 
     // fn parse_from_buffer_with_u32_be_header(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
@@ -79,7 +70,7 @@ impl Deserialize for u8 {
     fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
         Ok((
             Self::from_be_bytes(
-                bytes
+                bytes[0..1]
                     .try_into()
                     .map_err(|_| format!("Failed to decode content: {bytes:?}"))?,
             ),
@@ -99,7 +90,7 @@ impl Deserialize for u32 {
     fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
         Ok((
             Self::from_be_bytes(
-                bytes
+                bytes[0..4]
                     .try_into()
                     .map_err(|_| format!("Failed to decode content: {bytes:?}"))?,
             ),
@@ -119,7 +110,7 @@ impl Deserialize for u64 {
     fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
         Ok((
             Self::from_be_bytes(
-                bytes
+                bytes[0..8]
                     .try_into()
                     .map_err(|_| format!("Failed to decode content: {bytes:?}"))?,
             ),
@@ -140,6 +131,7 @@ impl<T: Serialize, const N: usize> Serialize for [T; N] {
 impl<T: Deserialize, const N: usize> Deserialize for [T; N] {
     fn deserialize(mut bytes: &[u8]) -> Result<(Self, &[u8]), String> {
         let mut out: [MaybeUninit<T>; N] = MaybeUninit::uninit_array();
+        dbg!(N);
         for elem in &mut out[..] {
             let (val, rest) = T::deserialize(bytes)?;
             bytes = rest;

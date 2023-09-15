@@ -139,7 +139,7 @@ impl Serialize for TrieRef {
 
 impl Deserialize for TrieRef {
     fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
-        let (r, rest) = <[u8; 16]>::deserialize(bytes)?;
+        let (r, rest) = <_>::deserialize(bytes)?;
         Ok((TrieRef(r), rest))
     }
 }

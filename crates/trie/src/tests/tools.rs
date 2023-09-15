@@ -1,15 +1,15 @@
 use std::collections::VecDeque;
 
-use crdts::{CmRDT, VClock};
+use crdts::{CmRDT, Dot, VClock};
 use db::backend::memory::MemoryDB;
-use utils::{PathTools, Serialize};
+use utils::{Deserialize, PathTools, Serialize};
 
 use crate::backend::common::TrieDBBackend;
 use crate::backend::TrieBackend;
 
 use crate::{Op, Trie, TrieKey, TrieRef};
 
-#[derive(Debug, Hash, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub struct Marker {
     actor: u64,
     clock: VClock<u64>,
@@ -17,8 +17,36 @@ pub struct Marker {
 }
 
 impl Serialize for Marker {
-    fn write_to_bytes(&self, bytes: Vec<u8>) -> Vec<u8> {
-        todo!()
+    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+        let bytes = self.actor.serialize(bytes);
+        let bytes = self
+            .clock
+            .iter()
+            .map(|v| (*v.actor, v.counter))
+            .collect::<Vec<_>>()
+            .serialize(bytes);
+        self.time.serialize(bytes)
+    }
+}
+
+impl Deserialize for Marker {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        let (actor, bytes) = <_>::deserialize(bytes)?;
+        let (clock, bytes) = Vec::<(u64, u64)>::deserialize(bytes)?;
+        let (time, bytes) = <_>::deserialize(bytes)?;
+
+        Ok((
+            Self {
+                actor,
+                clock: VClock::from_iter(
+                    clock
+                        .into_iter()
+                        .map(|(actor, counter)| Dot::new(actor, counter)),
+                ),
+                time,
+            },
+            bytes,
+        ))
     }
 }
 
@@ -54,7 +82,7 @@ impl End {
             actor: a,
             clock: Default::default(),
             time: 0,
-            trie: Trie::new(TrieDBBackend::n()),
+            trie: Trie::new(TrieDBBackend::default()),
         }
     }
 

@@ -55,7 +55,7 @@ impl Keys {
             Keys::IdRefsIndex(id) => key = id.write_to_bytes(key),
             Keys::AutoIncrementId => {}
             Keys::LogTotalLength => {}
-            Keys::Log(index) => key.extend_from_slice(&index.to_be_bytes()),
+            Keys::Log(index) => key = index.write_to_bytes(key),
             Keys::Logs => {}
         }
 
@@ -79,27 +79,25 @@ impl Keys {
 
         match label {
             b"r" => Ok(Self::RefIdIndex(
-                TrieRef::from_bytes(args).map_err(Error::DecodeError)?,
+                TrieRef::deserialize(args).map_err(Error::DecodeError)?.0,
             )),
             b"n" => Ok(Self::NodeInfo(
-                TrieId::from_bytes(args).map_err(Error::DecodeError)?,
+                TrieId::deserialize(args).map_err(Error::DecodeError)?.0,
             )),
             b"c" => {
-                let (id, key) = args.split_at(8);
+                let (id, args) = TrieId::deserialize(args).map_err(Error::DecodeError)?;
+                let (key, _) = TrieKey::deserialize(args).map_err(Error::DecodeError)?;
 
-                Ok(Self::NodeChild(
-                    TrieId::from_bytes(id).map_err(Error::DecodeError)?,
-                    TrieKey::from_bytes(&key[1..]).map_err(Error::DecodeError)?,
-                ))
+                Ok(Self::NodeChild(id, key))
             }
             b"i" => Ok(Self::IdRefsIndex(
-                TrieId::from_bytes(args).map_err(Error::DecodeError)?,
+                TrieId::deserialize(args).map_err(Error::DecodeError)?.0,
             )),
             b"auto_increment_id" => Ok(Self::AutoIncrementId),
             b"log_total_length" => Ok(Self::LogTotalLength),
-            b"l" => Ok(Self::Log(u64::from_be_bytes(
-                args.try_into().map_err(|_| error())?,
-            ))),
+            b"l" => Ok(Self::Log(
+                u64::deserialize(args).map_err(Error::DecodeError)?.0,
+            )),
             _ => Err(error()),
         }
     }
@@ -184,13 +182,9 @@ impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deser
             Values::RefIdIndex(id) => bytes = id.write_to_bytes(bytes),
             Values::NodeInfo(node) => bytes = node.write_to_bytes(bytes),
             Values::NodeChild(id) => bytes = id.write_to_bytes(bytes),
-            Values::IdRefsIndex(refs) => {
-                for r in refs.iter() {
-                    bytes = r.write_to_bytes(bytes);
-                }
-            }
-            Values::AutoIncrementId(id) => bytes.extend_from_slice(&id.id().to_be_bytes()),
-            Values::LogTotalLength(id) => bytes.extend_from_slice(&id.to_be_bytes()),
+            Values::IdRefsIndex(refs) => bytes = refs.write_to_bytes(bytes),
+            Values::AutoIncrementId(id) => bytes = id.write_to_bytes(bytes),
+            Values::LogTotalLength(id) => bytes = id.write_to_bytes(bytes),
             Values::Log(log) => bytes = log.write_to_bytes(bytes),
         }
 
@@ -207,34 +201,44 @@ impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deser
     fn parse(key: &Keys, bytes: &[u8]) -> Result<Self> {
         let error = || Error::DecodeError(format!("Failed to decode value: {bytes:?}"));
         Ok(match key {
-            Keys::RefIdIndex(_) => {
-                Self::RefIdIndex(TrieId::from_bytes(bytes).map_err(Error::DecodeError)?)
-            }
-            Keys::NodeInfo(_) => {
-                Self::NodeInfo(TrieNode::<C>::from_bytes(bytes).map_err(Error::DecodeError)?)
-            }
-            Keys::NodeChild(_, _) => {
-                Self::NodeChild(TrieId::from_bytes(bytes).map_err(Error::DecodeError)?)
-            }
-            Keys::IdRefsIndex(_) => {
-                let mut refs = vec![];
-                for r in bytes.chunks(16) {
-                    refs.push(TrieRef::from_bytes(r).map_err(Error::DecodeError)?)
-                }
-                Self::IdRefsIndex(refs)
-            }
+            Keys::RefIdIndex(_) => Self::RefIdIndex(
+                Deserialize::deserialize(bytes)
+                    .map_err(Error::DecodeError)?
+                    .0,
+            ),
+            Keys::NodeInfo(_) => Self::NodeInfo(
+                Deserialize::deserialize(bytes)
+                    .map_err(Error::DecodeError)?
+                    .0,
+            ),
+            Keys::NodeChild(_, _) => Self::NodeChild(
+                Deserialize::deserialize(bytes)
+                    .map_err(Error::DecodeError)?
+                    .0,
+            ),
+            Keys::IdRefsIndex(_) => Self::IdRefsIndex(
+                Deserialize::deserialize(bytes)
+                    .map_err(Error::DecodeError)?
+                    .0,
+            ),
             Keys::NodeChildren(_) => {
                 panic!("Keys::NodeChildren not have value format")
             }
-            Keys::AutoIncrementId => {
-                Self::AutoIncrementId(TrieId::from_bytes(bytes).map_err(Error::DecodeError)?)
-            }
-            Keys::LogTotalLength => {
-                Self::LogTotalLength(u64::from_be_bytes(bytes.try_into().map_err(|_| error())?))
-            }
-            Keys::Log(_) => {
-                Self::Log(LogOp::<M, C>::from_bytes(bytes).map_err(Error::DecodeError)?)
-            }
+            Keys::AutoIncrementId => Self::AutoIncrementId(
+                Deserialize::deserialize(bytes)
+                    .map_err(Error::DecodeError)?
+                    .0,
+            ),
+            Keys::LogTotalLength => Self::LogTotalLength(
+                Deserialize::deserialize(bytes)
+                    .map_err(Error::DecodeError)?
+                    .0,
+            ),
+            Keys::Log(_) => Self::Log(
+                Deserialize::deserialize(bytes)
+                    .map_err(Error::DecodeError)?
+                    .0,
+            ),
             Keys::Logs => {
                 panic!("Keys::Logs not have value format")
             }
@@ -428,6 +432,36 @@ pub struct TrieDBBackend<
     c: PhantomData<C>,
 }
 
+impl<
+        DBImpl: DB + Clone,
+        M: TrieMarker + Serialize + Deserialize,
+        C: TrieContent + Serialize + Deserialize,
+    > Clone for TrieDBBackend<DBImpl, M, C>
+{
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            m: self.m,
+            c: self.c,
+        }
+    }
+}
+
+impl<
+        DBImpl: DB + Default,
+        M: TrieMarker + Serialize + Deserialize,
+        C: TrieContent + Serialize + Deserialize,
+    > Default for TrieDBBackend<DBImpl, M, C>
+{
+    fn default() -> Self {
+        Self {
+            db: Default::default(),
+            m: Default::default(),
+            c: Default::default(),
+        }
+    }
+}
+
 impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
     TrieDBBackend<RocksDB, M, C>
 {
@@ -561,12 +595,6 @@ impl<
         })
     }
 }
-
-// impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
-//     TrieDBBackend<M, C>
-// {
-
-// }
 
 impl<
         DBImpl: DB,
