@@ -1,3 +1,6 @@
+#![feature(maybe_uninit_uninit_array)]
+#![feature(maybe_uninit_array_assume_init)]
+
 mod bytes_stringify;
 mod path;
 mod tree_stringify;

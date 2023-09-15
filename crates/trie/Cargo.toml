@@ -13,8 +13,6 @@ sha2 = "0.10.6"
 
 [dev-dependencies]
 criterion = { version = "0.4", features = ["html_reports"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.78"
 crdts = "7.3.0"
 indoc = "2"
 

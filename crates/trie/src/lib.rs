@@ -64,19 +64,15 @@ impl TrieId {
 }
 
 impl Serialize for TrieId {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes.extend_from_slice(self.as_bytes());
-        bytes
+    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+        self.0.serialize(bytes)
     }
 }
 
 impl Deserialize for TrieId {
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
-        Ok(Self::from(u64::from_be_bytes(
-            bytes
-                .try_into()
-                .map_err(|_| format!("Failed to decode id: {bytes:?}"))?,
-        )))
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        let (id, rest) = <[u8; 8]>::deserialize(bytes)?;
+        Ok((TrieId(id), rest))
     }
 }
 
@@ -97,18 +93,15 @@ impl TrieKey {
 }
 
 impl Serialize for TrieKey {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes.extend_from_slice(self.as_bytes());
-        bytes
+    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+        self.0.serialize(bytes)
     }
 }
 
 impl Deserialize for TrieKey {
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
-        Ok(Self::from(
-            String::from_utf8(bytes.to_vec())
-                .map_err(|_| format!("Failed to decode key: {bytes:?}"))?,
-        ))
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        let (key, rest) = String::deserialize(bytes)?;
+        Ok((TrieKey(key), rest))
     }
 }
 
@@ -139,17 +132,15 @@ impl TrieRef {
 }
 
 impl Serialize for TrieRef {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes.extend_from_slice(self.as_bytes());
-        bytes
+    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+        self.0.serialize(bytes)
     }
 }
 
 impl Deserialize for TrieRef {
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
-        Ok(Self::from(u128::from_be_bytes(bytes.try_into().map_err(
-            |_| format!("Failed to decode ref: {bytes:?}"),
-        )?)))
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        let (r, rest) = <[u8; 16]>::deserialize(bytes)?;
+        Ok((TrieRef(r), rest))
     }
 }
 
@@ -183,17 +174,15 @@ impl TrieHash {
 }
 
 impl Serialize for TrieHash {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes.extend_from_slice(self.as_bytes());
-        bytes
+    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+        self.0.serialize(bytes)
     }
 }
 
 impl Deserialize for TrieHash {
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
-        Ok(Self(bytes.try_into().map_err(|_| {
-            format!("Failed to decode hash: {bytes:?}")
-        })?))
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        let (r, rest) = <_>::deserialize(bytes)?;
+        Ok((TrieHash(r), rest))
     }
 }
 
@@ -224,25 +213,28 @@ pub struct TrieNode<C: TrieContent> {
 }
 
 impl<C: TrieContent + Serialize> Serialize for TrieNode<C> {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes = self.parent.write_to_bytes(bytes);
-        bytes = self.key.write_to_bytes_with_u32_be_header(bytes);
-        bytes = self.content.write_to_bytes(bytes);
+    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes = self.parent.serialize(bytes);
+        bytes = self.key.serialize(bytes);
+        bytes = self.content.serialize(bytes);
         bytes
     }
 }
 
 impl<C: TrieContent + Deserialize> Deserialize for TrieNode<C> {
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
-        let (parent, bytes) = TrieId::parse_from_buffer(bytes, 8)?;
-        let (key, bytes) = TrieKey::parse_from_buffer_with_u32_be_header(bytes)?;
-        let content = C::from_bytes(bytes)?;
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        let (parent, bytes) = TrieId::deserialize(bytes)?;
+        let (key, bytes) = TrieKey::deserialize(bytes)?;
+        let (content, bytes) = C::deserialize(bytes)?;
 
-        Ok(Self {
-            parent,
-            key,
-            content,
-        })
+        Ok((
+            Self {
+                parent,
+                key,
+                content,
+            },
+            bytes,
+        ))
     }
 }
 
@@ -265,23 +257,29 @@ pub enum Undo<C: TrieContent> {
 }
 
 impl<C: TrieContent + Serialize> Serialize for Undo<C> {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         match self {
             Undo::Ref(r, id) => {
                 bytes.push(b'r');
-                bytes = r.write_to_bytes(bytes);
+                bytes = r.serialize(bytes);
                 if let Some(id) = id {
-                    bytes = id.write_to_bytes(bytes);
+                    bytes.push(b'i');
+                    bytes = id.serialize(bytes);
+                } else {
+                    bytes.push(b'n');
                 }
                 bytes
             }
             Undo::Move { id, to } => {
                 bytes.push(b'm');
-                bytes = id.write_to_bytes(bytes);
+                bytes = id.serialize(bytes);
                 if let Some((to_id, to_key, to_c)) = to {
-                    bytes = to_id.write_to_bytes(bytes);
-                    bytes = to_key.write_to_bytes_with_u32_be_header(bytes);
-                    bytes = to_c.write_to_bytes(bytes);
+                    bytes.push(b'i');
+                    bytes = to_id.serialize(bytes);
+                    bytes = to_key.serialize(bytes);
+                    bytes = to_c.serialize(bytes);
+                } else {
+                    bytes.push(b'n');
                 }
                 bytes
             }
@@ -290,29 +288,29 @@ impl<C: TrieContent + Serialize> Serialize for Undo<C> {
 }
 
 impl<C: TrieContent + Deserialize> Deserialize for Undo<C> {
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
         match bytes[0] {
             b'r' => {
-                let (r, bytes) = TrieRef::parse_from_buffer(&bytes[1..], 16)?;
-                let id = if !bytes.is_empty() {
-                    let (id, _) = TrieId::parse_from_buffer(bytes, 8)?;
-                    Some(id)
+                let (r, bytes) = TrieRef::deserialize(&bytes[1..])?;
+                let (id, bytes) = if bytes[0] == b'i' {
+                    let (id, bytes) = TrieId::deserialize(bytes)?;
+                    (Some(id), bytes)
                 } else {
-                    None
+                    (None, &bytes[1..])
                 };
-                Ok(Undo::Ref(r, id))
+                Ok((Undo::Ref(r, id), bytes))
             }
             b'm' => {
-                let (id, bytes) = TrieId::parse_from_buffer(&bytes[1..], 8)?;
-                let to = if !bytes.is_empty() {
-                    let (to_id, bytes) = TrieId::parse_from_buffer(bytes, 8)?;
-                    let (to_key, bytes) = TrieKey::parse_from_buffer_with_u32_be_header(bytes)?;
-                    let to_c = C::from_bytes(bytes)?;
-                    Some((to_id, to_key, to_c))
+                let (id, bytes) = TrieId::deserialize(&bytes[1..])?;
+                let (to, bytes) = if bytes[0] == b'i' {
+                    let (to_id, bytes) = TrieId::deserialize(bytes)?;
+                    let (to_key, bytes) = TrieKey::deserialize(bytes)?;
+                    let (to_c, bytes) = C::deserialize(bytes)?;
+                    (Some((to_id, to_key, to_c)), bytes)
                 } else {
-                    None
+                    (None, &bytes[1..])
                 };
-                Ok(Undo::Move { id, to })
+                Ok((Undo::Move { id, to }, bytes))
             }
             _ => Err(format!("Failed to decode undo: {bytes:?}")),
         }
@@ -329,31 +327,34 @@ pub struct Op<M: TrieMarker, C: TrieContent> {
 }
 
 impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for Op<M, C> {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes = self.parent_ref.write_to_bytes(bytes);
-        bytes = self.child_key.write_to_bytes_with_u32_be_header(bytes);
-        bytes = self.child_ref.write_to_bytes(bytes);
-        bytes = self.marker.write_to_bytes_with_u32_be_header(bytes);
-        bytes = self.child_content.write_to_bytes(bytes);
+    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes = self.parent_ref.serialize(bytes);
+        bytes = self.child_key.serialize(bytes);
+        bytes = self.child_ref.serialize(bytes);
+        bytes = self.marker.serialize(bytes);
+        bytes = self.child_content.serialize(bytes);
         bytes
     }
 }
 
 impl<M: TrieMarker + Deserialize, C: TrieContent + Deserialize> Deserialize for Op<M, C> {
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
-        let (parent_ref, bytes) = TrieRef::parse_from_buffer(bytes, 16)?;
-        let (child_key, bytes) = TrieKey::parse_from_buffer_with_u32_be_header(bytes)?;
-        let (child_ref, bytes) = TrieRef::parse_from_buffer(bytes, 16)?;
-        let (marker, bytes) = M::parse_from_buffer_with_u32_be_header(bytes)?;
-        let child_content = C::from_bytes(bytes)?;
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        let (parent_ref, bytes) = TrieRef::deserialize(bytes)?;
+        let (child_key, bytes) = TrieKey::deserialize(bytes)?;
+        let (child_ref, bytes) = TrieRef::deserialize(bytes)?;
+        let (marker, bytes) = M::deserialize(bytes)?;
+        let (child_content, bytes) = C::deserialize(bytes)?;
 
-        Ok(Self {
-            marker,
-            parent_ref,
-            child_key,
-            child_ref,
-            child_content,
-        })
+        Ok((
+            Self {
+                marker,
+                parent_ref,
+                child_key,
+                child_ref,
+                child_content,
+            },
+            bytes,
+        ))
     }
 }
 
@@ -364,31 +365,19 @@ pub struct LogOp<M: TrieMarker, C: TrieContent> {
 }
 
 impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for LogOp<M, C> {
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes = self.op.write_to_bytes_with_u32_be_header(bytes);
-        for undo in self.undos.iter() {
-            bytes = undo.write_to_bytes_with_u32_be_header(bytes)
-        }
+    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes = self.op.serialize(bytes);
+        bytes = self.undos.serialize(bytes);
         bytes
     }
 }
 
 impl<M: TrieMarker + Deserialize, C: TrieContent + Deserialize> Deserialize for LogOp<M, C> {
-    fn from_bytes(bytes: &[u8]) -> std::result::Result<Self, String> {
-        let (op, bytes) = Op::<M, C>::parse_from_buffer_with_u32_be_header(bytes)?;
-        let mut undos = vec![];
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        let (op, bytes) = Op::<M, C>::deserialize(bytes)?;
+        let (undos, bytes) = Vec::<Undo<C>>::deserialize(bytes)?;
 
-        let mut rest_bytes = bytes;
-        loop {
-            if rest_bytes.is_empty() {
-                break;
-            }
-            let (undo, bytes) = Undo::<C>::parse_from_buffer_with_u32_be_header(rest_bytes)?;
-            undos.push(undo);
-            rest_bytes = bytes;
-        }
-
-        Ok(Self { op, undos })
+        Ok((Self { op, undos }, bytes))
     }
 }
 
