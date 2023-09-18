@@ -16,20 +16,6 @@ pub trait Deserialize: Sized {
     fn parse_from_bytes(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
         Self::deserialize(bytes)
     }
-
-    // fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-    //     panic!()
-    // }
-
-    // fn parse_from_buffer_with_u32_be_header(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
-    //     let key_lens = u32::from_be_bytes(
-    //         bytes[0..4]
-    //             .try_into()
-    //             .map_err(|_| format!("Failed to decode: {bytes:?}"))?,
-    //     ) as usize;
-
-    //     Self::parse_from_buffer(&bytes[4..], key_lens)
-    // }
 }
 
 impl Serialize for String {
@@ -45,15 +31,17 @@ impl Deserialize for String {
         let size = u32::from_be_bytes(
             bytes[0..4]
                 .try_into()
-                .map_err(|_| format!("Failed to decode: {bytes:?}"))?,
+                .map_err(|_| format!("Failed to decode string: {bytes:?}"))?,
         ) as usize;
 
+        let bytes = &bytes[4..];
+
         if bytes.len() < size {
-            return Err(format!("Failed to decode: {bytes:?}"));
+            return Err(format!("Failed to decode string: {bytes:?}"));
         }
         let (bytes, rest) = bytes.split_at(size);
         let value = Self::from_utf8(bytes.to_vec())
-            .map_err(|_| format!("Failed to decode content: {bytes:?}"))?;
+            .map_err(|_| format!("Failed to decode string: {bytes:?}"))?;
 
         Ok((value, rest))
     }
@@ -72,7 +60,7 @@ impl Deserialize for u8 {
             Self::from_be_bytes(
                 bytes[0..1]
                     .try_into()
-                    .map_err(|_| format!("Failed to decode content: {bytes:?}"))?,
+                    .map_err(|_| format!("Failed to decode u8: {bytes:?}"))?,
             ),
             &bytes[1..],
         ))
@@ -92,7 +80,7 @@ impl Deserialize for u32 {
             Self::from_be_bytes(
                 bytes[0..4]
                     .try_into()
-                    .map_err(|_| format!("Failed to decode content: {bytes:?}"))?,
+                    .map_err(|_| format!("Failed to decode u32: {bytes:?}"))?,
             ),
             &bytes[4..],
         ))
@@ -112,7 +100,7 @@ impl Deserialize for u64 {
             Self::from_be_bytes(
                 bytes[0..8]
                     .try_into()
-                    .map_err(|_| format!("Failed to decode content: {bytes:?}"))?,
+                    .map_err(|_| format!("Failed to decode u64: {bytes:?}"))?,
             ),
             &bytes[8..],
         ))
@@ -131,7 +119,6 @@ impl<T: Serialize, const N: usize> Serialize for [T; N] {
 impl<T: Deserialize, const N: usize> Deserialize for [T; N] {
     fn deserialize(mut bytes: &[u8]) -> Result<(Self, &[u8]), String> {
         let mut out: [MaybeUninit<T>; N] = MaybeUninit::uninit_array();
-        dbg!(N);
         for elem in &mut out[..] {
             let (val, rest) = T::deserialize(bytes)?;
             bytes = rest;
@@ -177,6 +164,37 @@ impl<T: Deserialize> Deserialize for Vec<T> {
             let (elem, bytes) = T::deserialize(rest)?;
             rest = bytes;
             arr.push(elem)
+        }
+
+        Ok((arr, rest))
+    }
+}
+
+impl<K: Serialize, V: Serialize> Serialize for std::collections::BTreeMap<K, V> {
+    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes = (self.len() as u32).serialize(bytes);
+        for (key, value) in self.iter() {
+            bytes = key.serialize(bytes);
+            bytes = value.serialize(bytes);
+        }
+        bytes
+    }
+}
+
+impl<K: Deserialize + std::cmp::Ord, V: Deserialize> Deserialize
+    for std::collections::BTreeMap<K, V>
+{
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        let mut rest = bytes;
+        let (len, bytes) = u32::deserialize(rest)?;
+        rest = bytes;
+
+        let mut arr = Self::new();
+        for _ in 0..len {
+            let (key, bytes) = K::deserialize(rest)?;
+            let (value, bytes) = V::deserialize(bytes)?;
+            rest = bytes;
+            arr.insert(key, value);
         }
 
         Ok((arr, rest))

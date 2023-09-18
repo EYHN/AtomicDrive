@@ -2,62 +2,126 @@ use std::fmt::Debug;
 
 use chunk::HashChunks;
 use crdts::{
-    ctx::{AddCtx, ReadCtx, RmCtx},
-    CmRDT, Dot, VClock,
+    ctx::{AddCtx, ReadCtx},
+    VClock,
 };
-use libp2p::PeerId;
-use trie::{backend::memory::TrieMemoryBackend, Trie};
-use utils::Digestible;
+use db::backend::memory::MemoryDB;
+use trie::{backend::db::TrieDBBackend, Trie};
+use utils::{Deserialize, Digestible, Serialize};
 
-#[derive(Debug, Hash, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct VIndexMarker {
-    clock: VClock<PeerId>,
-    timestamp: u64,
-    peer_id: PeerId,
+#[derive(Debug, Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Actor {
+    peer_id: libp2p::PeerId,
 }
 
-impl PartialOrd for VIndexMarker {
+impl Serialize for Actor {
+    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+        Vec::<u8>::serialize(&self.peer_id.to_bytes(), bytes)
+    }
+}
+
+impl Deserialize for Actor {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        let (peer_id, rest) = Vec::<u8>::deserialize(bytes)?;
+
+        Ok((
+            Actor {
+                peer_id: libp2p::PeerId::from_bytes(&peer_id).map_err(|e| e.to_string())?,
+            },
+            rest,
+        ))
+    }
+}
+
+#[derive(Debug, Hash, Clone, PartialEq, Eq)]
+pub struct Marker {
+    clock: VClock<Actor>,
+    timestamp: u64,
+    peer_id: Actor,
+}
+
+impl Serialize for Marker {
+    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes = self.clock.dots.serialize(bytes);
+        bytes = self.timestamp.serialize(bytes);
+        bytes = self.peer_id.serialize(bytes);
+        bytes
+    }
+}
+
+impl Deserialize for Marker {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        let (dots, bytes) = <_>::deserialize(bytes)?;
+        let (timestamp, bytes) = <_>::deserialize(bytes)?;
+        let (peer_id, bytes) = <_>::deserialize(bytes)?;
+
+        Ok((
+            Self {
+                clock: VClock { dots },
+                timestamp,
+                peer_id,
+            },
+            bytes,
+        ))
+    }
+}
+
+impl PartialOrd for Marker {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         todo!()
     }
 }
 
 #[derive(Debug, Hash, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum VIndexContent {
+pub enum Entity {
     HashChunks(HashChunks),
     Directory,
 }
 
-impl Digestible for VIndexContent {
+impl Serialize for Entity {
+    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+        todo!()
+    }
+}
+
+impl Deserialize for Entity {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        todo!()
+    }
+}
+
+impl Digestible for Entity {
     fn digest(&self, data: &mut impl utils::Digest) {
         todo!()
     }
 }
 
-impl Default for VIndexContent {
+impl Default for Entity {
     fn default() -> Self {
         Self::Directory
     }
 }
 
-type VIndexTrie = Trie<VIndexMarker, VIndexContent, TrieMemoryBackend<VIndexMarker, VIndexContent>>;
+type TrieType = Trie<Marker, Entity, TrieDBBackend<MemoryDB, Marker, Entity>>;
 
 #[derive(Clone)]
 pub struct VIndex {
-    trie: VIndexTrie,
-    clock: VClock<PeerId>,
+    trie: TrieType,
+    clock: VClock<Actor>,
 }
 
 impl VIndex {
-    pub fn write(
-        &mut self,
-        path: impl Into<String>,
-        object: VIndexContent,
-        timestamp: u64,
-        add_ctx: AddCtx<PeerId>,
-    ) {
-        let writer = self.trie.write();
-    }
+    // fn dir
+
+    // pub fn create_dir_and_(
+    //     &mut self,
+    //     path: impl Into<String>,
+    //     object: Entity,
+    //     timestamp: u64,
+    //     add_ctx: AddCtx<Actor>,
+    // ) {
+    //     let writer = self.trie.write();
+    // }
 
     // pub fn read(&self, key: impl Into<String>) -> ReadCtx<Option<IndexedObject>, IndexPeerId> {
     //     let read_ctx = self.map.get(&key.into());
@@ -93,17 +157,17 @@ impl VIndex {
     //     )
     // }
 
-    // pub fn read_ctx(&self) -> ReadCtx<(), IndexPeerId> {
-    //     ReadCtx {
-    //         add_clock: self.clock.clone(),
-    //         rm_clock: self.clock.clone(),
-    //         val: (),
-    //     }
-    // }
+    pub fn read_ctx(&self) -> ReadCtx<(), Actor> {
+        ReadCtx {
+            add_clock: self.clock.clone(),
+            rm_clock: self.clock.clone(),
+            val: (),
+        }
+    }
 
-    // pub fn clock(&self) -> VClock<IndexPeerId> {
-    //     self.map.read_ctx().add_clock
-    // }
+    pub fn clock(&self) -> VClock<Actor> {
+        self.clock.clone()
+    }
 
     // pub fn ops_after(&self, after: &VClock<IndexPeerId>) -> Vec<VIndexOp<IndexedObject>> {
     //     self.ops

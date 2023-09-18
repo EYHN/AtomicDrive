@@ -18,8 +18,6 @@ pub enum Error {
     InvalidOp(String),
     #[error("Decode error, {0}")]
     DecodeError(String),
-    #[error("rocksdb error")]
-    RocksdbError(#[from] rocksdb::Error),
     #[error("db error")]
     DBError(#[from] db::Error),
 }
@@ -293,7 +291,7 @@ impl<C: TrieContent + Deserialize> Deserialize for Undo<C> {
             b'r' => {
                 let (r, bytes) = TrieRef::deserialize(&bytes[1..])?;
                 let (id, bytes) = if bytes[0] == b'i' {
-                    let (id, bytes) = TrieId::deserialize(bytes)?;
+                    let (id, bytes) = TrieId::deserialize(&bytes[1..])?;
                     (Some(id), bytes)
                 } else {
                     (None, &bytes[1..])
@@ -303,7 +301,7 @@ impl<C: TrieContent + Deserialize> Deserialize for Undo<C> {
             b'm' => {
                 let (id, bytes) = TrieId::deserialize(&bytes[1..])?;
                 let (to, bytes) = if bytes[0] == b'i' {
-                    let (to_id, bytes) = TrieId::deserialize(bytes)?;
+                    let (to_id, bytes) = TrieId::deserialize(&bytes[1..])?;
                     let (to_key, bytes) = TrieKey::deserialize(bytes)?;
                     let (to_c, bytes) = C::deserialize(bytes)?;
                     (Some((to_id, to_key, to_c)), bytes)
@@ -328,10 +326,10 @@ pub struct Op<M: TrieMarker, C: TrieContent> {
 
 impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for Op<M, C> {
     fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes = self.marker.serialize(bytes);
         bytes = self.parent_ref.serialize(bytes);
         bytes = self.child_key.serialize(bytes);
         bytes = self.child_ref.serialize(bytes);
-        bytes = self.marker.serialize(bytes);
         bytes = self.child_content.serialize(bytes);
         bytes
     }
@@ -339,10 +337,10 @@ impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for Op<M, 
 
 impl<M: TrieMarker + Deserialize, C: TrieContent + Deserialize> Deserialize for Op<M, C> {
     fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        let (marker, bytes) = M::deserialize(bytes)?;
         let (parent_ref, bytes) = TrieRef::deserialize(bytes)?;
         let (child_key, bytes) = TrieKey::deserialize(bytes)?;
         let (child_ref, bytes) = TrieRef::deserialize(bytes)?;
-        let (marker, bytes) = M::deserialize(bytes)?;
         let (child_content, bytes) = C::deserialize(bytes)?;
 
         Ok((

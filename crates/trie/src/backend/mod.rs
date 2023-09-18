@@ -1,6 +1,5 @@
 pub mod memory;
-pub mod rocks;
-pub mod common;
+pub mod db;
 
 use std::borrow::Borrow;
 

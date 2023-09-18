@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 utils = { path = "../utils" }
 trie = { path = "../trie" }
+db = { path = "../db" }
 chunk = { path = "../chunk" }
 serde = { version = "1.0", features = ["derive"] }
 crdts = "7.3.0"

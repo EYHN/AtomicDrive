@@ -86,7 +86,7 @@ impl Keys {
             )),
             b"c" => {
                 let (id, args) = TrieId::deserialize(args).map_err(Error::DecodeError)?;
-                let (key, _) = TrieKey::deserialize(args).map_err(Error::DecodeError)?;
+                let (key, _) = TrieKey::deserialize(&args[1..]).map_err(Error::DecodeError)?;
 
                 Ok(Self::NodeChild(id, key))
             }
@@ -422,6 +422,7 @@ mod values_tests {
     }
 }
 
+#[derive(Clone)]
 pub struct TrieDBBackend<
     DBImpl: DB,
     M: TrieMarker + Serialize + Deserialize,
@@ -432,43 +433,13 @@ pub struct TrieDBBackend<
     c: PhantomData<C>,
 }
 
-impl<
-        DBImpl: DB + Clone,
-        M: TrieMarker + Serialize + Deserialize,
-        C: TrieContent + Serialize + Deserialize,
-    > Clone for TrieDBBackend<DBImpl, M, C>
-{
-    fn clone(&self) -> Self {
-        Self {
-            db: self.db.clone(),
-            m: self.m,
-            c: self.c,
-        }
-    }
-}
-
-impl<
-        DBImpl: DB + Default,
-        M: TrieMarker + Serialize + Deserialize,
-        C: TrieContent + Serialize + Deserialize,
-    > Default for TrieDBBackend<DBImpl, M, C>
-{
-    fn default() -> Self {
-        Self {
-            db: Default::default(),
-            m: Default::default(),
-            c: Default::default(),
-        }
-    }
-}
-
 impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
     TrieDBBackend<RocksDB, M, C>
 {
     pub fn open_or_create_rocks_db() -> Result<Self> {
-        let mut opts = rocksdb::Options::default();
-        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(11));
-        opts.create_if_missing(true);
+        // let mut opts = rocksdb::Options::default();
+        // opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(11));
+        // opts.create_if_missing(true);
 
         todo!()
     }

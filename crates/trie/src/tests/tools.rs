@@ -4,7 +4,7 @@ use crdts::{CmRDT, Dot, VClock};
 use db::backend::memory::MemoryDB;
 use utils::{Deserialize, PathTools, Serialize};
 
-use crate::backend::common::TrieDBBackend;
+use crate::backend::db::TrieDBBackend;
 use crate::backend::TrieBackend;
 
 use crate::{Op, Trie, TrieKey, TrieRef};
@@ -82,7 +82,7 @@ impl End {
             actor: a,
             clock: Default::default(),
             time: 0,
-            trie: Trie::new(TrieDBBackend::default()),
+            trie: Trie::new(TrieDBBackend::init(MemoryDB::default()).unwrap()),
         }
     }
 
@@ -127,22 +127,20 @@ impl End {
 
     pub fn rename(&mut self, from: &str, to: &str) {
         let mut writer = self.trie.write().unwrap();
-        let content = writer.get_by_path(from).unwrap().unwrap().content.clone();
+        let content = writer.get_by_path(from).unwrap().unwrap().content;
         let from = writer
             .get_refs_by_path(from)
             .unwrap()
             .unwrap()
             .next()
-            .unwrap()
-            .clone();
+            .unwrap();
         let filename = PathTools::basename(to).to_owned();
         let to = writer
             .get_refs_by_path(PathTools::dirname(to))
             .unwrap()
             .unwrap()
             .next()
-            .unwrap()
-            .clone();
+            .unwrap();
 
         self.clock.apply(self.clock.inc(self.actor));
 
@@ -170,8 +168,7 @@ impl End {
             .unwrap()
             .unwrap()
             .next()
-            .unwrap()
-            .clone();
+            .unwrap();
 
         self.clock.apply(self.clock.inc(self.actor));
 

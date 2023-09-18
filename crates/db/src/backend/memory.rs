@@ -9,9 +9,17 @@ type ValueBytes = Arc<[u8]>;
 
 type MapType = std::collections::BTreeMap<KeyBytes, ValueBytes>;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct MemoryDB {
     map: Arc<RwLock<MapType>>,
+}
+
+impl Clone for MemoryDB {
+    fn clone(&self) -> Self {
+        Self {
+            map: Arc::new(RwLock::new(self.map.as_ref().read().clone())),
+        }
+    }
 }
 
 impl MemoryDB {
@@ -151,7 +159,7 @@ impl DB for MemoryDB {
     fn start_transaction(&self) -> crate::Result<Self::Transaction<'_>> {
         Ok(MemoryDBTransaction {
             write: self.map.write(),
-            rollback: Vec::new(),
+            rollback: Vec::with_capacity(8),
         })
     }
 }
