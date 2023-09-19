@@ -1,11 +1,8 @@
-use std::collections::VecDeque;
+use std::{borrow::Borrow, collections::VecDeque};
 
 use crdts::{CmRDT, Dot, VClock};
 use db::backend::memory::MemoryDB;
 use utils::{Deserialize, PathTools, Serialize};
-
-use crate::backend::db::TrieDBBackend;
-use crate::backend::TrieBackend;
 
 use crate::{Op, Trie, TrieKey, TrieRef};
 
@@ -73,7 +70,7 @@ pub struct End {
     actor: u64,
     clock: VClock<u64>,
     time: u64,
-    trie: Trie<Marker, String, TrieDBBackend<MemoryDB, Marker, String>>,
+    trie: Trie<Marker, String, MemoryDB>,
 }
 
 impl End {
@@ -82,7 +79,7 @@ impl End {
             actor: a,
             clock: Default::default(),
             time: 0,
-            trie: Trie::new(TrieDBBackend::init(MemoryDB::default()).unwrap()),
+            trie: Trie::init(MemoryDB::default()).unwrap(),
         }
     }
 
@@ -94,8 +91,9 @@ impl End {
 
     pub fn ops_after(&self, after: &VClock<u64>) -> Vec<Op<Marker, String>> {
         let mut result = VecDeque::new();
-        for log in self.trie.backend.iter_log().unwrap() {
+        for log in self.trie.iter_log().unwrap() {
             let log = log.unwrap();
+            let log = log.borrow();
             let log_dot = log.op.marker.clock.dot(log.op.marker.actor);
             if log_dot > after.dot(log_dot.actor) {
                 result.push_front(log.op.clone())
@@ -127,20 +125,30 @@ impl End {
 
     pub fn rename(&mut self, from: &str, to: &str) {
         let mut writer = self.trie.write().unwrap();
-        let content = writer.get_by_path(from).unwrap().unwrap().content;
+        let content = writer
+            .get_by_path(from)
+            .unwrap()
+            .unwrap()
+            .borrow()
+            .content
+            .clone();
         let from = writer
             .get_refs_by_path(from)
             .unwrap()
             .unwrap()
             .next()
-            .unwrap();
+            .unwrap()
+            .borrow()
+            .clone();
         let filename = PathTools::basename(to).to_owned();
         let to = writer
             .get_refs_by_path(PathTools::dirname(to))
             .unwrap()
             .unwrap()
             .next()
-            .unwrap();
+            .unwrap()
+            .borrow()
+            .clone();
 
         self.clock.apply(self.clock.inc(self.actor));
 
@@ -168,7 +176,9 @@ impl End {
             .unwrap()
             .unwrap()
             .next()
-            .unwrap();
+            .unwrap()
+            .borrow()
+            .clone();
 
         self.clock.apply(self.clock.inc(self.actor));
 

@@ -1,9 +1,10 @@
-pub mod backend;
+pub mod store;
 
 use std::{borrow::Borrow, cmp::Ordering, fmt::Display, marker::PhantomData};
 
-use backend::{TrieBackend, TrieBackendWriter};
+use db::DB;
 use std::fmt::Debug;
+use store::{TrieStore, TrieStoreWriter};
 use thiserror::Error;
 use utils::{tree_stringify, Deserialize, Digestible, Serialize};
 use uuid::Uuid;
@@ -28,11 +29,11 @@ pub enum TrieDiff {
     Moved(Option<TrieId>, Option<TrieId>),
 }
 
-pub trait TrieContent: Clone + Hash + Default + Digestible {}
-impl<T: Clone + Hash + Default + Digestible> TrieContent for T {}
+pub trait TrieContent: Clone + Hash + Default + Digestible + Serialize + Deserialize {}
+impl<T: Clone + Hash + Default + Digestible + Serialize + Deserialize> TrieContent for T {}
 
-pub trait TrieMarker: PartialOrd + Clone + Hash {}
-impl<A: PartialOrd + Clone + Hash> TrieMarker for A {}
+pub trait TrieMarker: PartialOrd + Clone + Hash + Serialize + Deserialize {}
+impl<A: PartialOrd + Clone + Hash + Serialize + Deserialize> TrieMarker for A {}
 
 pub const ROOT: TrieId = TrieId(0u64.to_be_bytes());
 pub const CONFLICT: TrieId = TrieId(1u64.to_be_bytes());
@@ -210,7 +211,7 @@ pub struct TrieNode<C: TrieContent> {
     pub content: C,
 }
 
-impl<C: TrieContent + Serialize> Serialize for TrieNode<C> {
+impl<C: TrieContent> Serialize for TrieNode<C> {
     fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes = self.parent.serialize(bytes);
         bytes = self.key.serialize(bytes);
@@ -219,7 +220,7 @@ impl<C: TrieContent + Serialize> Serialize for TrieNode<C> {
     }
 }
 
-impl<C: TrieContent + Deserialize> Deserialize for TrieNode<C> {
+impl<C: TrieContent> Deserialize for TrieNode<C> {
     fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
         let (parent, bytes) = TrieId::deserialize(bytes)?;
         let (key, bytes) = TrieKey::deserialize(bytes)?;
@@ -254,7 +255,7 @@ pub enum Undo<C: TrieContent> {
     },
 }
 
-impl<C: TrieContent + Serialize> Serialize for Undo<C> {
+impl<C: TrieContent> Serialize for Undo<C> {
     fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         match self {
             Undo::Ref(r, id) => {
@@ -285,7 +286,7 @@ impl<C: TrieContent + Serialize> Serialize for Undo<C> {
     }
 }
 
-impl<C: TrieContent + Deserialize> Deserialize for Undo<C> {
+impl<C: TrieContent> Deserialize for Undo<C> {
     fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
         match bytes[0] {
             b'r' => {
@@ -324,7 +325,7 @@ pub struct Op<M: TrieMarker, C: TrieContent> {
     pub child_content: C,
 }
 
-impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for Op<M, C> {
+impl<M: TrieMarker, C: TrieContent> Serialize for Op<M, C> {
     fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes = self.marker.serialize(bytes);
         bytes = self.parent_ref.serialize(bytes);
@@ -335,7 +336,7 @@ impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for Op<M, 
     }
 }
 
-impl<M: TrieMarker + Deserialize, C: TrieContent + Deserialize> Deserialize for Op<M, C> {
+impl<M: TrieMarker, C: TrieContent> Deserialize for Op<M, C> {
     fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
         let (marker, bytes) = M::deserialize(bytes)?;
         let (parent_ref, bytes) = TrieRef::deserialize(bytes)?;
@@ -362,7 +363,7 @@ pub struct LogOp<M: TrieMarker, C: TrieContent> {
     pub undos: Vec<Undo<C>>,
 }
 
-impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for LogOp<M, C> {
+impl<M: TrieMarker, C: TrieContent> Serialize for LogOp<M, C> {
     fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
         bytes = self.op.serialize(bytes);
         bytes = self.undos.serialize(bytes);
@@ -370,7 +371,7 @@ impl<M: TrieMarker + Serialize, C: TrieContent + Serialize> Serialize for LogOp<
     }
 }
 
-impl<M: TrieMarker + Deserialize, C: TrieContent + Deserialize> Deserialize for LogOp<M, C> {
+impl<M: TrieMarker, C: TrieContent> Deserialize for LogOp<M, C> {
     fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
         let (op, bytes) = Op::<M, C>::deserialize(bytes)?;
         let (undos, bytes) = Vec::<Undo<C>>::deserialize(bytes)?;
@@ -379,14 +380,14 @@ impl<M: TrieMarker + Deserialize, C: TrieContent + Deserialize> Deserialize for 
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct Trie<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> {
-    backend: B,
+#[derive(Clone)]
+pub struct Trie<M: TrieMarker, C: TrieContent, DBImpl: DB> {
+    store: TrieStore<DBImpl, M, C>,
     m: PhantomData<M>,
     c: PhantomData<C>,
 }
 
-impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Display for Trie<M, C, B> {
+impl<M: TrieMarker, C: TrieContent + Display, DBImpl: DB> Display for Trie<M, C, DBImpl> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut items = vec![];
         self.dbg_itemization(ROOT, "", &mut items);
@@ -407,7 +408,7 @@ impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Display for 
     }
 }
 
-impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Debug for Trie<M, C, B> {
+impl<M: TrieMarker, C: TrieContent + Display, DBImpl: DB> Debug for Trie<M, C, DBImpl> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut items = vec![];
         self.dbg_itemization(ROOT, "", &mut items);
@@ -421,18 +422,18 @@ impl<M: TrieMarker, C: TrieContent + Display, B: TrieBackend<M, C>> Debug for Tr
     }
 }
 
-impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> Trie<M, C, B> {
-    pub fn new(backend: B) -> Self {
-        Trie {
-            backend,
+impl<M: TrieMarker, C: TrieContent, DBImpl: DB> Trie<M, C, DBImpl> {
+    pub fn init(db: DBImpl) -> Result<Self> {
+        Ok(Trie {
+            store: TrieStore::init(db)?,
             m: Default::default(),
             c: Default::default(),
-        }
+        })
     }
 
-    pub fn write(&mut self) -> Result<TrieUpdater<'_, M, C, B>> {
+    pub fn write(&mut self) -> Result<TrieUpdater<'_, M, C, DBImpl>> {
         Ok(TrieUpdater {
-            writer: self.backend.write()?,
+            writer: self.store.write()?,
         })
     }
 
@@ -442,8 +443,8 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> Trie<M, C, B> {
         prefix: &str,
         base: &mut Vec<(String, TrieId, TrieNode<C>)>,
     ) {
-        let node = self.backend.get_ensure(root).unwrap();
-        let children = self.backend.get_children(root).unwrap();
+        let node = self.store.get_ensure(root).unwrap();
+        let children = self.store.get_children(root).unwrap();
         let path = format!("{}/{}", prefix, node.borrow().key);
         base.push((path.clone(), root, node.borrow().clone()));
 
@@ -452,26 +453,21 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> Trie<M, C, B> {
             self.dbg_itemization(*id.borrow(), &path, base)
         }
     }
-
-    #[allow(dead_code)]
-    fn diff<OtherB: TrieBackend<M, C>>(&self, _other: &Trie<M, C, OtherB>) -> Vec<TrieDiff> {
-        todo!()
-    }
 }
 
-impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> std::ops::Deref for Trie<M, C, B> {
-    type Target = B;
+impl<M: TrieMarker, C: TrieContent, DBImpl: DB> std::ops::Deref for Trie<M, C, DBImpl> {
+    type Target = TrieStore<DBImpl, M, C>;
 
     fn deref(&self) -> &Self::Target {
-        &self.backend
+        &self.store
     }
 }
 
-pub struct TrieUpdater<'a, M: TrieMarker, C: TrieContent, B: TrieBackend<M, C> + 'a> {
-    writer: B::Writer<'a>,
+pub struct TrieUpdater<'a, M: TrieMarker, C: TrieContent, DBImpl: DB> {
+    writer: TrieStoreWriter<'a, DBImpl, M, C>,
 }
 
-impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, B> {
+impl<'a, M: TrieMarker + 'a, C: TrieContent + 'a, DBImpl: DB> TrieUpdater<'a, M, C, DBImpl> {
     fn move_node(
         &mut self,
         id: TrieId,
@@ -669,10 +665,10 @@ impl<M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> TrieUpdater<'_, M, C, 
     }
 }
 
-impl<'a, M: TrieMarker, C: TrieContent, B: TrieBackend<M, C>> std::ops::Deref
-    for TrieUpdater<'a, M, C, B>
+impl<'a, M: TrieMarker, C: TrieContent, DBImpl: DB> std::ops::Deref
+    for TrieUpdater<'a, M, C, DBImpl>
 {
-    type Target = B::Writer<'a>;
+    type Target = TrieStoreWriter<'a, DBImpl, M, C>;
 
     fn deref(&self) -> &Self::Target {
         &self.writer

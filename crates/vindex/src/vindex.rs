@@ -6,7 +6,7 @@ use crdts::{
     VClock,
 };
 use db::backend::memory::MemoryDB;
-use trie::{backend::db::TrieDBBackend, Trie};
+use trie::{backend::db::TrieStore, Trie};
 use utils::{Deserialize, Digestible, Serialize};
 
 #[derive(Debug, Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -102,7 +102,7 @@ impl Default for Entity {
     }
 }
 
-type TrieType = Trie<Marker, Entity, TrieDBBackend<MemoryDB, Marker, Entity>>;
+type TrieType = Trie<Marker, Entity, TrieStore<MemoryDB, Marker, Entity>>;
 
 #[derive(Clone)]
 pub struct VIndex {

@@ -31,6 +31,29 @@ pub trait DBRead {
     fn get_range(&self, from: impl AsRef<[u8]>, to: impl AsRef<[u8]>) -> Self::IterRange<'_>;
 }
 
+impl<T: DBRead> DBRead for &T {
+    type KeyBytes<'a> = T::KeyBytes<'a>
+    where
+        Self: 'a;
+    type ValueBytes<'a> = T::ValueBytes<'a>
+    where
+        Self: 'a;
+    fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Self::ValueBytes<'_>>> {
+        T::get(self, key)
+    }
+
+    fn has(&self, key: impl AsRef<[u8]>) -> Result<bool> {
+        T::has(self, key)
+    }
+
+    type IterRange<'a> = T::IterRange<'a>
+    where
+        Self: 'a;
+    fn get_range(&self, from: impl AsRef<[u8]>, to: impl AsRef<[u8]>) -> Self::IterRange<'_> {
+        T::get_range(self, from, to)
+    }
+}
+
 pub trait DBReadDyn {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
@@ -116,6 +139,16 @@ pub trait DB: DBRead {
         Self: 'a;
 
     fn start_transaction(&self) -> Result<Self::Transaction<'_>>;
+}
+
+impl<T: DB> DB for &T {
+    type Transaction<'a> = T::Transaction<'a>
+    where
+        Self: 'a;
+
+    fn start_transaction(&self) -> Result<Self::Transaction<'_>> {
+        T::start_transaction(self)
+    }
 }
 
 pub trait DBDyn: DBReadDyn {

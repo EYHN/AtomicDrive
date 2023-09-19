@@ -1,14 +1,12 @@
-use std::marker::PhantomData;
+use std::{borrow::Borrow, marker::PhantomData};
 
 use db::{backend::rocks::RocksDB, DBRead, DBTransaction, DBWrite, DB};
-use utils::{Deserialize, Serialize};
+use utils::{Deserialize, PathTools, Serialize};
 
 use crate::{
     Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef, CONFLICT,
     ROOT,
 };
-
-use super::{TrieBackend, TrieBackendWriter};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Keys {
@@ -63,7 +61,7 @@ impl Keys {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+        let mut bytes = Vec::with_capacity(16);
         bytes = self.write_bytes_label(bytes);
         bytes.push(b':');
         bytes = self.write_bytes_args(bytes);
@@ -153,7 +151,7 @@ mod keys_tests {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Values<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize> {
+enum Values<M: TrieMarker, C: TrieContent> {
     RefIdIndex(TrieId),
     NodeInfo(TrieNode<C>),
     NodeChild(TrieId),
@@ -163,9 +161,7 @@ enum Values<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize 
     Log(LogOp<M, C>),
 }
 
-impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
-    Values<M, C>
-{
+impl<M: TrieMarker, C: TrieContent> Values<M, C> {
     fn value_type(&self) -> &'static str {
         match self {
             Values::RefIdIndex(_) => "RefIdIndex",
@@ -199,7 +195,6 @@ impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deser
     }
 
     fn parse(key: &Keys, bytes: &[u8]) -> Result<Self> {
-        let error = || Error::DecodeError(format!("Failed to decode value: {bytes:?}"));
         Ok(match key {
             Keys::RefIdIndex(_) => Self::RefIdIndex(
                 Deserialize::deserialize(bytes)
@@ -423,19 +418,13 @@ mod values_tests {
 }
 
 #[derive(Clone)]
-pub struct TrieDBBackend<
-    DBImpl: DB,
-    M: TrieMarker + Serialize + Deserialize,
-    C: TrieContent + Serialize + Deserialize,
-> {
+pub struct TrieStore<DBImpl: DB, M: TrieMarker, C: TrieContent> {
     db: DBImpl,
     m: PhantomData<M>,
     c: PhantomData<C>,
 }
 
-impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deserialize>
-    TrieDBBackend<RocksDB, M, C>
-{
+impl<M: TrieMarker, C: TrieContent> TrieStore<RocksDB, M, C> {
     pub fn open_or_create_rocks_db() -> Result<Self> {
         // let mut opts = rocksdb::Options::default();
         // opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(11));
@@ -445,12 +434,7 @@ impl<M: TrieMarker + Serialize + Deserialize, C: TrieContent + Serialize + Deser
     }
 }
 
-impl<
-        DBImpl: DB,
-        M: TrieMarker + Serialize + Deserialize,
-        C: TrieContent + Serialize + Deserialize,
-    > TrieDBBackend<DBImpl, M, C>
-{
+impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     pub fn init(db: DBImpl) -> Result<Self> {
         let mut this = Self {
             db,
@@ -459,12 +443,12 @@ impl<
         };
 
         let mut writer = this.write()?;
-        writer.set(
+        writer.db_set(
             Keys::AutoIncrementId,
             Values::AutoIncrementId(TrieId::from(10)),
         )?;
-        writer.set(Keys::LogTotalLength, Values::LogTotalLength(0))?;
-        writer.set(
+        writer.db_set(Keys::LogTotalLength, Values::LogTotalLength(0))?;
+        writer.db_set(
             Keys::NodeInfo(ROOT),
             Values::NodeInfo(TrieNode {
                 parent: ROOT,
@@ -472,7 +456,7 @@ impl<
                 content: Default::default(),
             }),
         )?;
-        writer.set(
+        writer.db_set(
             Keys::NodeInfo(CONFLICT),
             Values::NodeInfo(TrieNode {
                 parent: CONFLICT,
@@ -480,8 +464,8 @@ impl<
                 content: Default::default(),
             }),
         )?;
-        writer.set(Keys::RefIdIndex(TrieRef::from(0)), Values::RefIdIndex(ROOT))?;
-        writer.set(
+        writer.db_set(Keys::RefIdIndex(TrieRef::from(0)), Values::RefIdIndex(ROOT))?;
+        writer.db_set(
             Keys::IdRefsIndex(ROOT),
             Values::IdRefsIndex(vec![TrieRef::from(0)]),
         )?;
@@ -491,319 +475,328 @@ impl<
         Ok(this)
     }
 
-    fn get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
+    fn db_get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
         if let Some(value) = self.db.get(key.to_bytes())? {
             Ok(Some(Values::parse(&key, value.as_ref())?))
         } else {
             Ok(None)
         }
     }
-}
 
-pub struct TrieDBBackendChildrenIter<
-    'a,
-    M: TrieMarker + Serialize + Deserialize,
-    C: TrieContent + Serialize + Deserialize,
-    DBReadImpl: DBRead + 'a,
-> {
-    iter: DBReadImpl::IterRange<'a>,
-    c: PhantomData<C>,
-    m: PhantomData<M>,
-}
-
-impl<
-        'a,
-        M: TrieMarker + Serialize + Deserialize,
-        C: TrieContent + Serialize + Deserialize,
-        DBReadImpl: DBRead + 'a,
-    > Iterator for TrieDBBackendChildrenIter<'a, M, C, DBReadImpl>
-{
-    type Item = Result<(TrieKey, TrieId)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().and_then(|i| {
-            i.map_err(Error::from)
-                .and_then(|item| {
-                    let key = Keys::parse(item.0.as_ref())?;
-                    let value = Values::<M, C>::parse(&key, item.1.as_ref())?.node_child()?;
-                    let key = key.node_child()?.1;
-
-                    Ok(Some((key, value)))
-                })
-                .transpose()
-        })
-    }
-}
-
-pub struct TrieDBBackendLogIter<
-    'a,
-    M: TrieMarker + Serialize + Deserialize,
-    C: TrieContent + Serialize + Deserialize,
-    DBReadImpl: DBRead + 'a,
-> {
-    iter: DBReadImpl::IterRange<'a>,
-    c: PhantomData<C>,
-    m: PhantomData<M>,
-}
-
-impl<
-        'a,
-        M: TrieMarker + Serialize + Deserialize,
-        C: TrieContent + Serialize + Deserialize,
-        DBReadImpl: DBRead,
-    > Iterator for TrieDBBackendLogIter<'a, M, C, DBReadImpl>
-{
-    type Item = Result<LogOp<M, C>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|i| {
-            i.map_err(Error::from).and_then(|item| {
-                let key = Keys::parse(item.0.as_ref())?;
-                let value = Values::<M, C>::parse(&key, item.1.as_ref())?.log()?;
-
-                Ok(value)
-            })
-        })
-    }
-}
-
-impl<
-        DBImpl: DB,
-        M: TrieMarker + Serialize + Deserialize,
-        C: TrieContent + Serialize + Deserialize,
-    > TrieBackend<M, C> for TrieDBBackend<DBImpl, M, C>
-{
-    fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
-        self.get(Keys::RefIdIndex(r))?
+    pub fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
+        self.db_get(Keys::RefIdIndex(r))?
             .map(|v| v.ref_id_index())
             .transpose()
     }
 
-    type GetRefsRef<'a> = TrieRef
-    where
-        Self: 'a;
-
-    type GetRefs<'a> = std::vec::IntoIter<TrieRef>
-    where
-        Self: 'a;
-
-    fn get_refs(&self, id: TrieId) -> Result<Option<Self::GetRefs<'_>>> {
-        self.get(Keys::IdRefsIndex(id))?
+    pub fn get_refs(
+        &self,
+        id: TrieId,
+    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
+        self.db_get(Keys::IdRefsIndex(id))?
             .map(|v| v.id_refs_index().map(|v| v.into_iter()))
             .transpose()
     }
 
-    type Get<'a> = TrieNode<C>
-    where
-        Self: 'a;
-
-    fn get(&self, id: TrieId) -> Result<Option<Self::Get<'_>>> {
-        self.get(Keys::NodeInfo(id))?
+    pub fn get(&self, id: TrieId) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
+        self.db_get(Keys::NodeInfo(id))?
             .map(|v| v.node_info())
             .transpose()
     }
 
-    type GetChildrenKey<'a> = TrieKey
-    where
-        Self: 'a;
-
-    type GetChildrenId<'a>  = TrieId
-    where
-        Self: 'a;
-
-    type GetChildren<'a> = TrieDBBackendChildrenIter<'a, M, C, DBImpl>
-    where Self: 'a;
-
-    fn get_children(&self, id: TrieId) -> Result<Self::GetChildren<'_>> {
+    pub fn get_children(
+        &self,
+        id: TrieId,
+    ) -> Result<impl Iterator<Item = Result<(impl Borrow<TrieKey> + '_, impl Borrow<TrieId> + '_)>>>
+    {
         let prefix = Keys::NodeChildren(id).to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
         let iter = self.db.get_range(&prefix, &upper_bound);
 
-        Ok(TrieDBBackendChildrenIter {
-            iter,
-            c: Default::default(),
-            m: Default::default(),
-        })
+        Ok(iter.map(|item| {
+            item.map_err(Error::from).and_then(|item| {
+                let key = Keys::parse(item.0.as_ref())?;
+                let value = Values::<M, C>::parse(&key, item.1.as_ref())?.node_child()?;
+                let key = key.node_child()?.1;
+
+                Ok((key, value))
+            })
+        }))
     }
 
-    fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
-        self.get(Keys::NodeChild(id, key))?
+    pub fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
+        self.db_get(Keys::NodeChild(id, key))?
             .map(|v| v.node_child())
             .transpose()
     }
 
-    type IterLogItem<'a> = LogOp<M, C>
-    where
-        Self: 'a;
-    type IterLog<'a> = TrieDBBackendLogIter<'a, M, C, DBImpl>
-    where
-        Self: 'a;
-    fn iter_log(&self) -> Result<Self::IterLog<'_>> {
+    pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<impl Borrow<LogOp<M, C>> + '_>>> {
         let prefix = Keys::Logs.to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
         let iter = self.db.get_range(&prefix, &upper_bound);
 
-        Ok(TrieDBBackendLogIter {
-            iter,
-            c: Default::default(),
-            m: Default::default(),
+        Ok(iter.map(|item| {
+            item.map_err(Error::from).and_then(|item| {
+                let key = Keys::parse(item.0.as_ref())?;
+                let value = Values::<M, C>::parse(&key, item.1.as_ref())?.log()?;
+
+                Ok(value)
+            })
+        }))
+    }
+
+    pub fn get_ensure(&self, id: TrieId) -> Result<impl Borrow<TrieNode<C>> + '_> {
+        self.get(id)?
+            .ok_or_else(|| Error::TreeBroken(format!("Trie id {id} not found")))
+    }
+
+    pub fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
+        let mut target_id = child_id;
+        while let Some(node) = self.get(target_id)? {
+            if node.borrow().parent == ancestor_id {
+                return Ok(true);
+            }
+            target_id = node.borrow().parent;
+            if target_id.id() < 10 {
+                break;
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn get_id_by_path(&self, path: &str) -> Result<Option<TrieId>> {
+        let mut id = ROOT;
+        if path != "/" {
+            for part in PathTools::parts(path) {
+                if let Some(child_id) = self.get_child(id, TrieKey(part.to_string()))? {
+                    id = child_id
+                } else {
+                    return Ok(None);
+                }
+            }
+        }
+
+        Ok(Some(id))
+    }
+
+    pub fn get_refs_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
+        self.get_id_by_path(path).and_then(|id| {
+            if let Some(id) = id {
+                self.get_refs(id)
+            } else {
+                Ok(None)
+            }
         })
     }
 
-    type Writer<'a> = TrieDBBackendWriter<'a, DBImpl, M, C>
-    where Self: 'a;
+    pub fn get_by_path(&self, path: &str) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
+        self.get_id_by_path(path).and_then(|id| {
+            if let Some(id) = id {
+                self.get(id)
+            } else {
+                Ok(None)
+            }
+        })
+    }
 
-    fn write(&'_ mut self) -> Result<Self::Writer<'_>> {
-        Ok(Self::Writer {
+    pub fn write(&'_ mut self) -> Result<TrieStoreWriter<'_, DBImpl, M, C>> {
+        Ok(TrieStoreWriter {
             transaction: self.db.start_transaction()?,
+            cache_log_total_len: None,
+            cache_inc_id: None,
             m: Default::default(),
             c: Default::default(),
         })
     }
 }
 
-pub struct TrieDBBackendWriter<'a, DBImpl: DB + 'a, M: TrieMarker, C: TrieContent> {
+pub struct TrieStoreWriter<'a, DBImpl: DB + 'a, M: TrieMarker, C: TrieContent> {
     transaction: DBImpl::Transaction<'a>,
+    cache_log_total_len: Option<u64>,
+    cache_inc_id: Option<TrieId>,
     m: PhantomData<M>,
     c: PhantomData<C>,
 }
 
-impl<
-        DBImpl: DB,
-        M: TrieMarker + Serialize + Deserialize,
-        C: TrieContent + Serialize + Deserialize,
-    > TrieDBBackendWriter<'_, DBImpl, M, C>
+impl<'a, DBImpl: DB + 'a, M: TrieMarker + 'a, C: TrieContent + 'a>
+    TrieStoreWriter<'a, DBImpl, M, C>
 {
-    fn get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
-        if let Some(value) = self.transaction.get(key.to_bytes())? {
+    fn db_get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
+        if let Some(value) = self.transaction.get_for_update(key.to_bytes())? {
             Ok(Some(Values::parse(&key, value.as_ref())?))
         } else {
             Ok(None)
         }
     }
 
-    fn set(&mut self, key: Keys, value: Values<M, C>) -> Result<()> {
+    fn db_set(&mut self, key: Keys, value: Values<M, C>) -> Result<()> {
         self.transaction.set(key.to_bytes(), value.to_bytes())?;
         Ok(())
     }
 
-    fn del(&mut self, key: Keys) -> Result<()> {
+    fn db_del(&mut self, key: Keys) -> Result<()> {
         self.transaction.delete(key.to_bytes())?;
         Ok(())
     }
-}
 
-impl<
-        'db,
-        DBImpl: DB,
-        M: TrieMarker + Serialize + Deserialize,
-        C: TrieContent + Serialize + Deserialize,
-    > TrieBackend<M, C> for TrieDBBackendWriter<'db, DBImpl, M, C>
-{
-    fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
-        self.get(Keys::RefIdIndex(r))?
+    fn log_total_len(&mut self) -> Result<u64> {
+        Ok(
+            if let Some(cache_log_total_len) = self.cache_log_total_len {
+                cache_log_total_len
+            } else {
+                self.db_get(Keys::LogTotalLength)?
+                    .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?
+                    .log_total_length()?
+            },
+        )
+    }
+
+    fn update_log_total_len(&mut self, new_len: u64) -> Result<()> {
+        self.db_set(Keys::LogTotalLength, Values::LogTotalLength(new_len))
+    }
+
+    pub fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
+        self.db_get(Keys::RefIdIndex(r))?
             .map(|v| v.ref_id_index())
             .transpose()
     }
 
-    type GetRefsRef<'a> = TrieRef
-    where
-        Self: 'a;
-
-    type GetRefs<'a> = std::vec::IntoIter<TrieRef>
-    where
-        Self: 'a;
-
-    fn get_refs(&self, id: TrieId) -> Result<Option<Self::GetRefs<'_>>> {
-        self.get(Keys::IdRefsIndex(id))?
+    pub fn get_refs(
+        &self,
+        id: TrieId,
+    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
+        self.db_get(Keys::IdRefsIndex(id))?
             .map(|v| v.id_refs_index().map(|v| v.into_iter()))
             .transpose()
     }
 
-    type Get<'a> = TrieNode<C>
-    where
-        Self: 'a;
-
-    fn get(&self, id: TrieId) -> Result<Option<Self::Get<'_>>> {
-        self.get(Keys::NodeInfo(id))?
+    pub fn get(&self, id: TrieId) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
+        self.db_get(Keys::NodeInfo(id))?
             .map(|v| v.node_info())
             .transpose()
     }
 
-    type GetChildrenKey<'a> = TrieKey
-    where
-        Self: 'a;
-
-    type GetChildrenId<'a>  = TrieId
-    where
-        Self: 'a;
-
-    type GetChildren<'a> = TrieDBBackendChildrenIter<'a, M, C, DBImpl::Transaction<'db>>
-    where Self: 'a;
-
-    fn get_children(&self, id: TrieId) -> Result<Self::GetChildren<'_>> {
+    pub fn get_children(
+        &self,
+        id: TrieId,
+    ) -> Result<
+        impl Iterator<
+            Item = Result<(
+                impl Borrow<TrieKey> + 'a + '_,
+                impl Borrow<TrieId> + 'a + '_,
+            )>,
+        >,
+    > {
         let prefix = Keys::NodeChildren(id).to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
         let iter = self.transaction.get_range(&prefix, &upper_bound);
 
-        Ok(TrieDBBackendChildrenIter {
-            iter,
-            c: Default::default(),
-            m: Default::default(),
-        })
+        Ok(iter.map(|item| {
+            item.map_err(Error::from).and_then(|item| {
+                let key = Keys::parse(item.0.as_ref())?;
+                let value = Values::<M, C>::parse(&key, item.1.as_ref())?.node_child()?;
+                let key = key.node_child()?.1;
+
+                Ok((key, value))
+            })
+        }))
     }
 
-    fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
-        self.get(Keys::NodeChild(id, key))?
+    pub fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
+        self.db_get(Keys::NodeChild(id, key))?
             .map(|v| v.node_child())
             .transpose()
     }
 
-    type IterLogItem<'a> = LogOp<M, C>
-    where
-        Self: 'a;
-    type IterLog<'a> = TrieDBBackendLogIter<'a, M, C, DBImpl::Transaction<'db>>
-    where
-        Self: 'a;
-    fn iter_log(&self) -> Result<Self::IterLog<'_>> {
+    pub fn iter_log(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<impl Borrow<LogOp<M, C>> + 'a + '_>>> {
         let prefix = Keys::Logs.to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
         let iter = self.transaction.get_range(&prefix, &upper_bound);
 
-        Ok(TrieDBBackendLogIter {
-            iter,
-            c: Default::default(),
-            m: Default::default(),
+        Ok(iter.map(|item| {
+            item.map_err(Error::from).and_then(|item| {
+                let key = Keys::parse(item.0.as_ref())?;
+                let value = Values::<M, C>::parse(&key, item.1.as_ref())?.log()?;
+
+                Ok(value)
+            })
+        }))
+    }
+
+    pub fn get_ensure(&self, id: TrieId) -> Result<impl Borrow<TrieNode<C>> + '_> {
+        self.get(id)?
+            .ok_or_else(|| Error::TreeBroken(format!("Trie id {id} not found")))
+    }
+
+    pub fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
+        let mut target_id = child_id;
+        while let Some(node) = self.get(target_id)? {
+            if node.borrow().parent == ancestor_id {
+                return Ok(true);
+            }
+            target_id = node.borrow().parent;
+            if target_id.id() < 10 {
+                break;
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn get_id_by_path(&self, path: &str) -> Result<Option<TrieId>> {
+        let mut id = ROOT;
+        if path != "/" {
+            for part in PathTools::parts(path) {
+                if let Some(child_id) = self.get_child(id, TrieKey(part.to_string()))? {
+                    id = child_id
+                } else {
+                    return Ok(None);
+                }
+            }
+        }
+
+        Ok(Some(id))
+    }
+
+    pub fn get_refs_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
+        self.get_id_by_path(path).and_then(|id| {
+            if let Some(id) = id {
+                self.get_refs(id)
+            } else {
+                Ok(None)
+            }
         })
     }
 
-    type Writer<'a> = TrieDBBackendWriter<'a, DBImpl, M, C>
-    where Self: 'a;
-
-    fn write(&'_ mut self) -> Result<Self::Writer<'_>> {
-        Err(Error::InvalidOp("not support".to_string()))
+    pub fn get_by_path(&self, path: &str) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
+        self.get_id_by_path(path).and_then(|id| {
+            if let Some(id) = id {
+                self.get(id)
+            } else {
+                Ok(None)
+            }
+        })
     }
-}
 
-impl<
-        'a,
-        DBImpl: DB,
-        M: TrieMarker + Serialize + Deserialize,
-        C: TrieContent + Serialize + Deserialize,
-    > TrieBackendWriter<'a, M, C> for TrieDBBackendWriter<'a, DBImpl, M, C>
-{
-    fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>> {
+    pub fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>> {
         let old_id = if let Some(id) = self
-            .get(Keys::RefIdIndex(r.to_owned()))?
+            .db_get(Keys::RefIdIndex(r.to_owned()))?
             .map(|v| v.ref_id_index())
             .transpose()?
         {
             if let Some(mut id_refs) = self
-                .get(Keys::IdRefsIndex(id))?
+                .db_get(Keys::IdRefsIndex(id))?
                 .map(|v| v.id_refs_index())
                 .transpose()?
             {
@@ -811,70 +804,75 @@ impl<
                     id_refs.remove(i);
                 }
                 if id_refs.is_empty() {
-                    self.del(Keys::IdRefsIndex(id))?;
+                    self.db_del(Keys::IdRefsIndex(id))?;
                 } else {
-                    self.set(Keys::IdRefsIndex(id), Values::IdRefsIndex(id_refs))?;
+                    self.db_set(Keys::IdRefsIndex(id), Values::IdRefsIndex(id_refs))?;
                 }
             }
-            self.del(Keys::RefIdIndex(r.to_owned()))?;
+            self.db_del(Keys::RefIdIndex(r.to_owned()))?;
             Some(id)
         } else {
             None
         };
 
         if let Some(id) = id {
-            self.set(Keys::RefIdIndex(r.to_owned()), Values::RefIdIndex(id))?;
+            self.db_set(Keys::RefIdIndex(r.to_owned()), Values::RefIdIndex(id))?;
             if let Some(mut refs) = self
-                .get(Keys::IdRefsIndex(id))?
+                .db_get(Keys::IdRefsIndex(id))?
                 .map(|v| v.id_refs_index())
                 .transpose()?
             {
                 if refs.iter().all(|item| item != &r) {
                     refs.push(r);
-                    self.set(Keys::IdRefsIndex(id), Values::IdRefsIndex(refs))?;
+                    self.db_set(Keys::IdRefsIndex(id), Values::IdRefsIndex(refs))?;
                 }
             } else {
-                self.set(Keys::IdRefsIndex(id), Values::IdRefsIndex(vec![r]))?;
+                self.db_set(Keys::IdRefsIndex(id), Values::IdRefsIndex(vec![r]))?;
             }
         }
 
         Ok(old_id)
     }
 
-    fn create_id(&mut self) -> Result<TrieId> {
-        let id = self
-            .get(Keys::AutoIncrementId)?
-            .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?
-            .auto_increment_id()?;
+    pub fn create_id(&mut self) -> Result<TrieId> {
+        let id = if let Some(cache_inc_id) = self.cache_inc_id {
+            cache_inc_id
+        } else {
+            self.db_get(Keys::AutoIncrementId)?
+                .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?
+                .auto_increment_id()?
+        };
         let new_id = id.inc();
 
-        self.set(Keys::AutoIncrementId, Values::AutoIncrementId(new_id))?;
+        self.db_set(Keys::AutoIncrementId, Values::AutoIncrementId(new_id))?;
+
+        self.cache_inc_id = Some(new_id);
 
         Ok(new_id)
     }
 
-    fn set_tree_node(
+    pub fn set_tree_node(
         &mut self,
         id: TrieId,
         to: Option<(TrieId, TrieKey, C)>,
     ) -> Result<Option<(TrieId, TrieKey, C)>> {
         let node = self
-            .get(Keys::NodeInfo(id))?
+            .db_get(Keys::NodeInfo(id))?
             .map(|v| v.node_info())
             .transpose()?;
 
         if let Some(node) = &node {
-            self.del(Keys::NodeInfo(id))?;
-            self.del(Keys::NodeChild(node.parent, node.key.to_owned()))?;
+            self.db_del(Keys::NodeInfo(id))?;
+            self.db_del(Keys::NodeChild(node.parent, node.key.to_owned()))?;
         }
 
         if let Some(to) = to {
-            self.set(
+            self.db_set(
                 Keys::NodeChild(to.0, to.1.to_owned()),
                 Values::NodeChild(id),
             )?;
 
-            self.set(
+            self.db_set(
                 Keys::NodeInfo(id),
                 Values::NodeInfo(TrieNode {
                     parent: to.0,
@@ -887,11 +885,8 @@ impl<
         Ok(node.map(|n| (n.parent, n.key, n.content)))
     }
 
-    fn pop_log(&mut self) -> Result<Option<LogOp<M, C>>> {
-        let log_len = self
-            .get(Keys::LogTotalLength)?
-            .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?
-            .log_total_length()?;
+    pub fn pop_log(&mut self) -> Result<Option<LogOp<M, C>>> {
+        let log_len = self.log_total_len()?;
 
         if log_len == 0 {
             return Ok(None);
@@ -899,34 +894,31 @@ impl<
 
         let pop_index = u64::MAX - (log_len - 1);
         let log = self
-            .get(Keys::Log(pop_index))?
+            .db_get(Keys::Log(pop_index))?
             .ok_or(Error::TreeBroken("log not found.".to_owned()))?
             .log()?;
-        self.set(Keys::LogTotalLength, Values::LogTotalLength(log_len - 1))?;
-        self.del(Keys::Log(pop_index))?;
+        self.db_del(Keys::Log(pop_index))?;
+        self.update_log_total_len(log_len - 1)?;
 
         Ok(Some(log))
     }
 
-    fn push_log(&mut self, log: LogOp<M, C>) -> Result<()> {
-        let log_len = self
-            .get(Keys::LogTotalLength)?
-            .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?
-            .log_total_length()?;
+    pub fn push_log(&mut self, log: LogOp<M, C>) -> Result<()> {
+        let log_len = self.log_total_len()?;
 
         let push_index = u64::MAX - log_len;
-        self.set(Keys::Log(push_index), Values::Log(log))?;
-        self.set(Keys::LogTotalLength, Values::LogTotalLength(log_len + 1))?;
+        self.db_set(Keys::Log(push_index), Values::Log(log))?;
+        self.update_log_total_len(log_len + 1)?;
 
         Ok(())
     }
 
-    fn commit(self) -> Result<()> {
+    pub fn commit(self) -> Result<()> {
         self.transaction.commit()?;
         Ok(())
     }
 
-    fn rollback(self) -> Result<()> {
+    pub fn rollback(self) -> Result<()> {
         self.transaction.rollback()?;
         Ok(())
     }
