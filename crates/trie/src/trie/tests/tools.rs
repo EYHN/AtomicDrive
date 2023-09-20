@@ -4,7 +4,7 @@ use crdts::{CmRDT, Dot, VClock};
 use db::backend::memory::MemoryDB;
 use utils::{Deserialize, PathTools, Serialize};
 
-use crate::{Op, Trie, TrieKey, TrieRef};
+use super::super::{Op, Trie, TrieKey, TrieRef};
 
 #[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub struct Marker {
@@ -226,7 +226,7 @@ macro_rules! testing {
       $($e;)*
     };
     (check $( $x:ident )* { $e:expr }) => {
-        crate::tests::tools::check(&[$(
+        tools::check(&[$(
             &$x,
         )*], indoc::indoc! {$e})
     };
@@ -234,7 +234,7 @@ macro_rules! testing {
         $from.sync_with(&mut $to);
     };
     (have { $($end:ident($end_id:literal))* }) => {
-        $(let mut $end = crate::tests::tools::End::new($end_id);)*
+        $(let mut $end = tools::End::new($end_id);)*
     };
     (clone { $from:ident => $to:ident($to_id:literal) }) => {
         let mut $to = $from.clone_as($to_id);

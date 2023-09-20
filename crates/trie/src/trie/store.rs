@@ -3,7 +3,7 @@ use std::{borrow::Borrow, marker::PhantomData};
 use db::{backend::rocks::RocksDB, DBRead, DBTransaction, DBWrite, DB};
 use utils::{Deserialize, PathTools, Serialize};
 
-use crate::{
+use super::{
     Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef, CONFLICT,
     ROOT,
 };
@@ -110,7 +110,7 @@ impl Keys {
 
 #[cfg(test)]
 mod keys_tests {
-    use crate::{TrieId, TrieKey, TrieRef};
+    use super::{TrieId, TrieKey, TrieRef};
 
     use super::Keys;
 
@@ -313,7 +313,7 @@ impl<M: TrieMarker, C: TrieContent> Values<M, C> {
 
 #[cfg(test)]
 mod values_tests {
-    use crate::{LogOp, Op, TrieId, TrieKey, TrieNode, TrieRef, Undo};
+    use super::super::{LogOp, Op, TrieId, TrieKey, TrieNode, TrieRef, Undo};
 
     use super::{Keys, Values};
 
@@ -435,12 +435,16 @@ impl<M: TrieMarker, C: TrieContent> TrieStore<RocksDB, M, C> {
 }
 
 impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
-    pub fn init(db: DBImpl) -> Result<Self> {
-        let mut this = Self {
+    pub fn from_db(db: DBImpl) -> Self {
+        Self {
             db,
             m: Default::default(),
             c: Default::default(),
-        };
+        }
+    }
+
+    pub fn init(db: DBImpl) -> Result<Self> {
+        let mut this = Self::from_db(db);
 
         let mut writer = this.write()?;
         writer.db_set(
@@ -604,7 +608,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
         })
     }
 
-    pub fn write(&'_ mut self) -> Result<TrieStoreWriter<'_, DBImpl, M, C>> {
+    pub fn write(&'_ mut self) -> Result<TrieStoreWriter<DBImpl::Transaction<'_>, M, C>> {
         Ok(TrieStoreWriter {
             transaction: self.db.start_transaction()?,
             cache_log_total_len: None,
@@ -615,17 +619,15 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     }
 }
 
-pub struct TrieStoreWriter<'a, DBImpl: DB + 'a, M: TrieMarker, C: TrieContent> {
-    transaction: DBImpl::Transaction<'a>,
+pub struct TrieStoreWriter<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> {
+    transaction: DBImpl,
     cache_log_total_len: Option<u64>,
     cache_inc_id: Option<TrieId>,
     m: PhantomData<M>,
     c: PhantomData<C>,
 }
 
-impl<'a, DBImpl: DB + 'a, M: TrieMarker + 'a, C: TrieContent + 'a>
-    TrieStoreWriter<'a, DBImpl, M, C>
-{
+impl<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> TrieStoreWriter<DBImpl, M, C> {
     fn db_get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
         if let Some(value) = self.transaction.get_for_update(key.to_bytes())? {
             Ok(Some(Values::parse(&key, value.as_ref())?))
@@ -684,14 +686,8 @@ impl<'a, DBImpl: DB + 'a, M: TrieMarker + 'a, C: TrieContent + 'a>
     pub fn get_children(
         &self,
         id: TrieId,
-    ) -> Result<
-        impl Iterator<
-            Item = Result<(
-                impl Borrow<TrieKey> + 'a + '_,
-                impl Borrow<TrieId> + 'a + '_,
-            )>,
-        >,
-    > {
+    ) -> Result<impl Iterator<Item = Result<(impl Borrow<TrieKey> + '_, impl Borrow<TrieId> + '_)>>>
+    {
         let prefix = Keys::NodeChildren(id).to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
@@ -714,9 +710,7 @@ impl<'a, DBImpl: DB + 'a, M: TrieMarker + 'a, C: TrieContent + 'a>
             .transpose()
     }
 
-    pub fn iter_log(
-        &self,
-    ) -> Result<impl Iterator<Item = Result<impl Borrow<LogOp<M, C>> + 'a + '_>>> {
+    pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<impl Borrow<LogOp<M, C>> + '_>>> {
         let prefix = Keys::Logs.to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
