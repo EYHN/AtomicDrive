@@ -6,7 +6,7 @@ macro_rules! testing {
             macro_rules! call_tests {
                 ($$db:ident) => {
                     $(
-                        $$db.drop_all()?;
+                        $$db.clear()?;
                         println!("Starting run test {} for {}", stringify!($test), stringify!($$db));
                         $test(&$$db)?;
                     )*

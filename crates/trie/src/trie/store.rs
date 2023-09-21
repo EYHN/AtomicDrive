@@ -1,7 +1,7 @@
 use std::{borrow::Borrow, marker::PhantomData};
 
-use db::{backend::rocks::RocksDB, DBRead, DBTransaction, DBWrite, DB};
-use utils::{Deserialize, PathTools, Serialize};
+use db::{backend::rocks::RocksDB, DBLock, DBRead, DBTransaction, DBWrite, DB};
+use utils::{Deserialize, PathTools, Serialize, Serializer};
 
 use super::{
     Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef, CONFLICT,
@@ -21,9 +21,93 @@ enum Keys {
     Logs,
 }
 
+impl Serialize for Keys {
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        serializer.extend_from_slice(self.bytes_label());
+        serializer.push(b':');
+        match self {
+            Keys::RefIdIndex(r) => serializer = r.serialize(serializer),
+            Keys::NodeInfo(id) => serializer = id.serialize(serializer),
+            Keys::NodeChild(id, k) => {
+                serializer = id.serialize(serializer);
+                serializer.push(b':');
+                serializer = k.serialize(serializer)
+            }
+            Keys::NodeChildren(id) => {
+                serializer = id.serialize(serializer);
+                serializer.push(b':')
+            }
+            Keys::IdRefsIndex(id) => serializer = id.serialize(serializer),
+            Keys::AutoIncrementId => {}
+            Keys::LogTotalLength => {}
+            Keys::Log(index) => serializer = index.serialize(serializer),
+            Keys::Logs => {}
+        }
+
+        serializer
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(
+            self.bytes_label().len() + 1 + {
+                match self {
+                    Keys::RefIdIndex(r) => r.byte_size()?,
+                    Keys::NodeInfo(id) => id.byte_size()?,
+                    Keys::NodeChild(id, k) => id.byte_size()? + 1 + k.byte_size()?,
+                    Keys::NodeChildren(id) => id.byte_size()? + 1,
+                    Keys::IdRefsIndex(id) => id.byte_size()?,
+                    Keys::AutoIncrementId => 0,
+                    Keys::LogTotalLength => 0,
+                    Keys::Log(index) => index.byte_size()?,
+                    Keys::Logs => 0,
+                }
+            },
+        )
+    }
+}
+
+impl Deserialize for Keys {
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        let (label, args) = bytes.split_at(
+            bytes
+                .iter()
+                .position(|b| b == &b':')
+                .ok_or("Failed deserialize keys.")?,
+        );
+        let args = &args[1..];
+
+        match label {
+            b"r" => {
+                let (r, rest) = TrieRef::deserialize(args)?;
+                Ok((Self::RefIdIndex(r), rest))
+            }
+            b"n" => {
+                let (id, rest) = TrieId::deserialize(args)?;
+                Ok((Self::NodeInfo(id), rest))
+            }
+            b"c" => {
+                let (id, args) = TrieId::deserialize(args)?;
+                let (key, rest) = TrieKey::deserialize(&args[1..])?;
+
+                Ok((Self::NodeChild(id, key), rest))
+            }
+            b"i" => {
+                let (id, rest) = TrieId::deserialize(args)?;
+                Ok((Self::IdRefsIndex(id), rest))
+            }
+            b"auto_increment_id" => Ok((Self::AutoIncrementId, args)),
+            b"log_total_length" => Ok((Self::LogTotalLength, args)),
+            b"l" => {
+                let (log_id, rest) = u64::deserialize(args)?;
+                Ok((Self::Log(log_id), rest))
+            }
+            _ => Err("Failed deserialize keys.".to_string()),
+        }
+    }
+}
 impl Keys {
-    fn write_bytes_label(&self, mut key: Vec<u8>) -> Vec<u8> {
-        key.extend_from_slice(match self {
+    fn bytes_label(&self) -> &'static [u8] {
+        match self {
             Keys::RefIdIndex(_) => b"r",
             Keys::NodeInfo(_) => b"n",
             Keys::NodeChild(_, _) => b"c",
@@ -33,70 +117,6 @@ impl Keys {
             Keys::LogTotalLength => b"log_total_length",
             Keys::Log(_) => b"l",
             Keys::Logs => b"l",
-        });
-        key
-    }
-
-    fn write_bytes_args(&self, mut key: Vec<u8>) -> Vec<u8> {
-        match self {
-            Keys::RefIdIndex(r) => key = r.write_to_bytes(key),
-            Keys::NodeInfo(id) => key = id.write_to_bytes(key),
-            Keys::NodeChild(id, k) => {
-                key = id.write_to_bytes(key);
-                key.push(b':');
-                key = k.write_to_bytes(key)
-            }
-            Keys::NodeChildren(id) => {
-                key = id.write_to_bytes(key);
-                key.push(b':')
-            }
-            Keys::IdRefsIndex(id) => key = id.write_to_bytes(key),
-            Keys::AutoIncrementId => {}
-            Keys::LogTotalLength => {}
-            Keys::Log(index) => key = index.write_to_bytes(key),
-            Keys::Logs => {}
-        }
-
-        key
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(16);
-        bytes = self.write_bytes_label(bytes);
-        bytes.push(b':');
-        bytes = self.write_bytes_args(bytes);
-
-        bytes
-    }
-
-    fn parse(bytes: &[u8]) -> Result<Self> {
-        let error = || Error::DecodeError(format!("Failed to decode key: {bytes:?}"));
-        let (label, args) =
-            bytes.split_at(bytes.iter().position(|b| b == &b':').ok_or_else(error)?);
-        let args = &args[1..];
-
-        match label {
-            b"r" => Ok(Self::RefIdIndex(
-                TrieRef::deserialize(args).map_err(Error::DecodeError)?.0,
-            )),
-            b"n" => Ok(Self::NodeInfo(
-                TrieId::deserialize(args).map_err(Error::DecodeError)?.0,
-            )),
-            b"c" => {
-                let (id, args) = TrieId::deserialize(args).map_err(Error::DecodeError)?;
-                let (key, _) = TrieKey::deserialize(&args[1..]).map_err(Error::DecodeError)?;
-
-                Ok(Self::NodeChild(id, key))
-            }
-            b"i" => Ok(Self::IdRefsIndex(
-                TrieId::deserialize(args).map_err(Error::DecodeError)?.0,
-            )),
-            b"auto_increment_id" => Ok(Self::AutoIncrementId),
-            b"log_total_length" => Ok(Self::LogTotalLength),
-            b"l" => Ok(Self::Log(
-                u64::deserialize(args).map_err(Error::DecodeError)?.0,
-            )),
-            _ => Err(error()),
         }
     }
 
@@ -110,6 +130,8 @@ impl Keys {
 
 #[cfg(test)]
 mod keys_tests {
+    use utils::{Deserialize, Serialize};
+
     use super::{TrieId, TrieKey, TrieRef};
 
     use super::Keys;
@@ -117,34 +139,34 @@ mod keys_tests {
     #[test]
     fn test_keys() {
         assert_eq!(
-            Keys::parse(&Keys::RefIdIndex(TrieRef::from(999)).to_bytes()).unwrap(),
+            Keys::from_bytes(&Keys::RefIdIndex(TrieRef::from(999)).to_bytes()).unwrap(),
             Keys::RefIdIndex(TrieRef::from(999))
         );
         assert_eq!(
-            Keys::parse(&Keys::NodeInfo(TrieId::from(999)).to_bytes()).unwrap(),
+            Keys::from_bytes(&Keys::NodeInfo(TrieId::from(999)).to_bytes()).unwrap(),
             Keys::NodeInfo(TrieId::from(999))
         );
         assert_eq!(
-            Keys::parse(
+            Keys::from_bytes(
                 &Keys::NodeChild(TrieId::from(999), TrieKey::from("hello".to_owned())).to_bytes()
             )
             .unwrap(),
             Keys::NodeChild(TrieId::from(999), TrieKey::from("hello".to_owned()))
         );
         assert_eq!(
-            Keys::parse(&Keys::IdRefsIndex(TrieId::from(999)).to_bytes()).unwrap(),
+            Keys::from_bytes(&Keys::IdRefsIndex(TrieId::from(999)).to_bytes()).unwrap(),
             Keys::IdRefsIndex(TrieId::from(999))
         );
         assert_eq!(
-            Keys::parse(&Keys::AutoIncrementId.to_bytes()).unwrap(),
+            Keys::from_bytes(&Keys::AutoIncrementId.to_bytes()).unwrap(),
             Keys::AutoIncrementId
         );
         assert_eq!(
-            Keys::parse(&Keys::LogTotalLength.to_bytes()).unwrap(),
+            Keys::from_bytes(&Keys::LogTotalLength.to_bytes()).unwrap(),
             Keys::LogTotalLength
         );
         assert_eq!(
-            Keys::parse(&Keys::Log(111).to_bytes()).unwrap(),
+            Keys::from_bytes(&Keys::Log(111).to_bytes()).unwrap(),
             Keys::Log(111)
         );
     }
@@ -173,25 +195,16 @@ impl<M: TrieMarker, C: TrieContent> Values<M, C> {
             Values::Log(_) => "Log",
         }
     }
-    fn write_to_bytes(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+    fn to_bytes(&self) -> impl AsRef<[u8]> {
         match self {
-            Values::RefIdIndex(id) => bytes = id.write_to_bytes(bytes),
-            Values::NodeInfo(node) => bytes = node.write_to_bytes(bytes),
-            Values::NodeChild(id) => bytes = id.write_to_bytes(bytes),
-            Values::IdRefsIndex(refs) => bytes = refs.write_to_bytes(bytes),
-            Values::AutoIncrementId(id) => bytes = id.write_to_bytes(bytes),
-            Values::LogTotalLength(id) => bytes = id.write_to_bytes(bytes),
-            Values::Log(log) => bytes = log.write_to_bytes(bytes),
+            Values::RefIdIndex(id) => id.to_bytes(),
+            Values::NodeInfo(node) => node.to_bytes(),
+            Values::NodeChild(id) => id.to_bytes(),
+            Values::IdRefsIndex(refs) => refs.to_bytes(),
+            Values::AutoIncrementId(id) => id.to_bytes(),
+            Values::LogTotalLength(id) => id.to_bytes(),
+            Values::Log(log) => log.to_bytes(),
         }
-
-        bytes
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes = self.write_to_bytes(bytes);
-
-        bytes
     }
 
     fn parse(key: &Keys, bytes: &[u8]) -> Result<Self> {
@@ -324,7 +337,7 @@ mod values_tests {
         assert_eq!(
             TestValue::parse(
                 &Keys::RefIdIndex(Default::default()),
-                &TestValue::RefIdIndex(TrieId::from(12)).to_bytes()
+                TestValue::RefIdIndex(TrieId::from(12)).to_bytes().as_ref()
             )
             .unwrap(),
             Values::RefIdIndex(TrieId::from(12))
@@ -333,12 +346,13 @@ mod values_tests {
         assert_eq!(
             TestValue::parse(
                 &Keys::NodeInfo(Default::default()),
-                &TestValue::NodeInfo(TrieNode {
+                TestValue::NodeInfo(TrieNode {
                     parent: TrieId::from(199),
                     key: TrieKey::from("world".to_string()),
                     content: 256
                 })
                 .to_bytes()
+                .as_ref()
             )
             .unwrap(),
             TestValue::NodeInfo(TrieNode {
@@ -351,7 +365,7 @@ mod values_tests {
         assert_eq!(
             TestValue::parse(
                 &Keys::NodeChild(Default::default(), Default::default()),
-                &TestValue::NodeChild(TrieId::from(999)).to_bytes()
+                TestValue::NodeChild(TrieId::from(999)).to_bytes().as_ref()
             )
             .unwrap(),
             Values::NodeChild(TrieId::from(999))
@@ -360,7 +374,9 @@ mod values_tests {
         assert_eq!(
             TestValue::parse(
                 &Keys::IdRefsIndex(Default::default()),
-                &TestValue::IdRefsIndex(vec![TrieRef::from(156), TrieRef::from(8888)]).to_bytes()
+                TestValue::IdRefsIndex(vec![TrieRef::from(156), TrieRef::from(8888)])
+                    .to_bytes()
+                    .as_ref()
             )
             .unwrap(),
             TestValue::IdRefsIndex(vec![TrieRef::from(156), TrieRef::from(8888)])
@@ -369,7 +385,9 @@ mod values_tests {
         assert_eq!(
             TestValue::parse(
                 &Keys::AutoIncrementId,
-                &TestValue::AutoIncrementId(TrieId::from(555)).to_bytes()
+                TestValue::AutoIncrementId(TrieId::from(555))
+                    .to_bytes()
+                    .as_ref()
             )
             .unwrap(),
             TestValue::AutoIncrementId(TrieId::from(555))
@@ -378,7 +396,7 @@ mod values_tests {
         assert_eq!(
             TestValue::parse(
                 &Keys::LogTotalLength,
-                &TestValue::LogTotalLength(456).to_bytes()
+                TestValue::LogTotalLength(456).to_bytes().as_ref()
             )
             .unwrap(),
             TestValue::LogTotalLength(456)
@@ -409,7 +427,7 @@ mod values_tests {
         assert_eq!(
             TestValue::parse(
                 &Keys::Log(Default::default()),
-                &TestValue::Log(test_log.clone()).to_bytes()
+                TestValue::Log(test_log.clone()).to_bytes().as_ref()
             )
             .unwrap(),
             TestValue::Log(test_log)
@@ -520,7 +538,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
 
         Ok(iter.map(|item| {
             item.map_err(Error::from).and_then(|item| {
-                let key = Keys::parse(item.0.as_ref())?;
+                let key = Keys::from_bytes(item.0.as_ref()).map_err(Error::DecodeError)?;
                 let value = Values::<M, C>::parse(&key, item.1.as_ref())?.node_child()?;
                 let key = key.node_child()?.1;
 
@@ -543,7 +561,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
 
         Ok(iter.map(|item| {
             item.map_err(Error::from).and_then(|item| {
-                let key = Keys::parse(item.0.as_ref())?;
+                let key = Keys::from_bytes(item.0.as_ref()).map_err(Error::DecodeError)?;
                 let value = Values::<M, C>::parse(&key, item.1.as_ref())?.log()?;
 
                 Ok(value)
@@ -609,17 +627,11 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     }
 
     pub fn write(&'_ mut self) -> Result<TrieStoreWriter<DBImpl::Transaction<'_>, M, C>> {
-        Ok(TrieStoreWriter {
-            transaction: self.db.start_transaction()?,
-            cache_log_total_len: None,
-            cache_inc_id: None,
-            m: Default::default(),
-            c: Default::default(),
-        })
+        Ok(TrieStoreWriter::from_db(self.db.start_transaction()?))
     }
 }
 
-pub struct TrieStoreWriter<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> {
+pub struct TrieStoreWriter<DBImpl, M: TrieMarker, C: TrieContent> {
     transaction: DBImpl,
     cache_log_total_len: Option<u64>,
     cache_inc_id: Option<TrieId>,
@@ -627,7 +639,19 @@ pub struct TrieStoreWriter<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent>
     c: PhantomData<C>,
 }
 
-impl<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> TrieStoreWriter<DBImpl, M, C> {
+impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
+    TrieStoreWriter<DBImpl, M, C>
+{
+    pub fn from_db(db: DBImpl) -> Self {
+        Self {
+            transaction: db,
+            cache_log_total_len: None,
+            cache_inc_id: None,
+            m: Default::default(),
+            c: Default::default(),
+        }
+    }
+
     fn db_get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
         if let Some(value) = self.transaction.get_for_update(key.to_bytes())? {
             Ok(Some(Values::parse(&key, value.as_ref())?))
@@ -695,7 +719,7 @@ impl<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> TrieStoreWriter<DBImp
 
         Ok(iter.map(|item| {
             item.map_err(Error::from).and_then(|item| {
-                let key = Keys::parse(item.0.as_ref())?;
+                let key = Keys::from_bytes(item.0.as_ref()).map_err(Error::DecodeError)?;
                 let value = Values::<M, C>::parse(&key, item.1.as_ref())?.node_child()?;
                 let key = key.node_child()?.1;
 
@@ -718,7 +742,7 @@ impl<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> TrieStoreWriter<DBImp
 
         Ok(iter.map(|item| {
             item.map_err(Error::from).and_then(|item| {
-                let key = Keys::parse(item.0.as_ref())?;
+                let key = Keys::from_bytes(item.0.as_ref()).map_err(Error::DecodeError)?;
                 let value = Values::<M, C>::parse(&key, item.1.as_ref())?.log()?;
 
                 Ok(value)
@@ -906,7 +930,9 @@ impl<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> TrieStoreWriter<DBImp
 
         Ok(())
     }
+}
 
+impl<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> TrieStoreWriter<DBImpl, M, C> {
     pub fn commit(self) -> Result<()> {
         self.transaction.commit()?;
         Ok(())

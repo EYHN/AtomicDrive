@@ -1,8 +1,8 @@
 use std::{borrow::Borrow, collections::VecDeque};
 
-use crdts::{CmRDT, Dot, VClock};
+use crdts::{CmRDT, VClock};
 use db::backend::memory::MemoryDB;
-use utils::{Deserialize, PathTools, Serialize};
+use utils::{Deserialize, PathTools, Serialize, Serializer};
 
 use super::super::{Op, Trie, TrieKey, TrieRef};
 
@@ -14,32 +14,27 @@ pub struct Marker {
 }
 
 impl Serialize for Marker {
-    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
-        let bytes = self.actor.serialize(bytes);
-        let bytes = self
-            .clock
-            .iter()
-            .map(|v| (*v.actor, v.counter))
-            .collect::<Vec<_>>()
-            .serialize(bytes);
-        self.time.serialize(bytes)
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        serializer = self.actor.serialize(serializer);
+        serializer = self.clock.dots.serialize(serializer);
+        self.time.serialize(serializer)
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(self.actor.byte_size()? + self.clock.dots.byte_size()? + self.time.byte_size()?)
     }
 }
 
 impl Deserialize for Marker {
     fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
         let (actor, bytes) = <_>::deserialize(bytes)?;
-        let (clock, bytes) = Vec::<(u64, u64)>::deserialize(bytes)?;
+        let (dots, bytes) = <_>::deserialize(bytes)?;
         let (time, bytes) = <_>::deserialize(bytes)?;
 
         Ok((
             Self {
                 actor,
-                clock: VClock::from_iter(
-                    clock
-                        .into_iter()
-                        .map(|(actor, counter)| Dot::new(actor, counter)),
-                ),
+                clock: VClock { dots },
                 time,
             },
             bytes,

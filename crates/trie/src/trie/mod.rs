@@ -2,11 +2,11 @@ pub mod store;
 
 use std::{borrow::Borrow, cmp::Ordering, fmt::Display, marker::PhantomData};
 
-use db::{DB, DBTransaction};
+use db::{DBLock, DBRead, DBTransaction, DBWrite, DB};
 use std::fmt::Debug;
 use store::{TrieStore, TrieStoreWriter};
 use thiserror::Error;
-use utils::{tree_stringify, Deserialize, Digestible, Serialize};
+use utils::{tree_stringify, Deserialize, Digestible, Serialize, Serializer};
 use uuid::Uuid;
 
 use std::hash::Hash;
@@ -63,8 +63,12 @@ impl TrieId {
 }
 
 impl Serialize for TrieId {
-    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
-        self.0.serialize(bytes)
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        self.0.serialize(serializer)
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        self.0.byte_size()
     }
 }
 
@@ -92,8 +96,12 @@ impl TrieKey {
 }
 
 impl Serialize for TrieKey {
-    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
-        self.0.serialize(bytes)
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        self.0.serialize(serializer)
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        self.0.byte_size()
     }
 }
 
@@ -131,8 +139,12 @@ impl TrieRef {
 }
 
 impl Serialize for TrieRef {
-    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
-        self.0.serialize(bytes)
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        self.0.serialize(serializer)
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        self.0.byte_size()
     }
 }
 
@@ -173,8 +185,12 @@ impl TrieHash {
 }
 
 impl Serialize for TrieHash {
-    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
-        self.0.serialize(bytes)
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        self.0.serialize(serializer)
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        self.0.byte_size()
     }
 }
 
@@ -212,11 +228,15 @@ pub struct TrieNode<C: TrieContent> {
 }
 
 impl<C: TrieContent> Serialize for TrieNode<C> {
-    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes = self.parent.serialize(bytes);
-        bytes = self.key.serialize(bytes);
-        bytes = self.content.serialize(bytes);
-        bytes
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        serializer = self.parent.serialize(serializer);
+        serializer = self.key.serialize(serializer);
+        serializer = self.content.serialize(serializer);
+        serializer
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(self.parent.byte_size()? + self.key.byte_size()? + self.content.byte_size()?)
     }
 }
 
@@ -256,33 +276,56 @@ pub enum Undo<C: TrieContent> {
 }
 
 impl<C: TrieContent> Serialize for Undo<C> {
-    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
         match self {
             Undo::Ref(r, id) => {
-                bytes.push(b'r');
-                bytes = r.serialize(bytes);
+                serializer.push(b'r');
+                serializer = r.serialize(serializer);
                 if let Some(id) = id {
-                    bytes.push(b'i');
-                    bytes = id.serialize(bytes);
+                    serializer.push(b'i');
+                    serializer = id.serialize(serializer);
                 } else {
-                    bytes.push(b'n');
+                    serializer.push(b'n');
                 }
-                bytes
+                serializer
             }
             Undo::Move { id, to } => {
-                bytes.push(b'm');
-                bytes = id.serialize(bytes);
+                serializer.push(b'm');
+                serializer = id.serialize(serializer);
                 if let Some((to_id, to_key, to_c)) = to {
-                    bytes.push(b'i');
-                    bytes = to_id.serialize(bytes);
-                    bytes = to_key.serialize(bytes);
-                    bytes = to_c.serialize(bytes);
+                    serializer.push(b'i');
+                    serializer = to_id.serialize(serializer);
+                    serializer = to_key.serialize(serializer);
+                    serializer = to_c.serialize(serializer);
                 } else {
-                    bytes.push(b'n');
+                    serializer.push(b'n');
                 }
-                bytes
+                serializer
             }
         }
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(match self {
+            Undo::Ref(r, id) => {
+                if let Some(id) = id {
+                    1 + r.byte_size()? + 1 + id.byte_size()?
+                } else {
+                    1 + r.byte_size()? + 1
+                }
+            }
+            Undo::Move { id, to } => {
+                if let Some((to_id, to_key, to_c)) = to {
+                    1 + id.byte_size()?
+                        + 1
+                        + to_id.byte_size()?
+                        + to_key.byte_size()?
+                        + to_c.byte_size()?
+                } else {
+                    1 + id.byte_size()? + 1
+                }
+            }
+        })
     }
 }
 
@@ -326,13 +369,23 @@ pub struct Op<M: TrieMarker, C: TrieContent> {
 }
 
 impl<M: TrieMarker, C: TrieContent> Serialize for Op<M, C> {
-    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes = self.marker.serialize(bytes);
-        bytes = self.parent_ref.serialize(bytes);
-        bytes = self.child_key.serialize(bytes);
-        bytes = self.child_ref.serialize(bytes);
-        bytes = self.child_content.serialize(bytes);
-        bytes
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        serializer = self.marker.serialize(serializer);
+        serializer = self.parent_ref.serialize(serializer);
+        serializer = self.child_key.serialize(serializer);
+        serializer = self.child_ref.serialize(serializer);
+        serializer = self.child_content.serialize(serializer);
+        serializer
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(
+            self.marker.byte_size()?
+                + self.parent_ref.byte_size()?
+                + self.child_key.byte_size()?
+                + self.child_ref.byte_size()?
+                + self.child_content.byte_size()?,
+        )
     }
 }
 
@@ -364,10 +417,14 @@ pub struct LogOp<M: TrieMarker, C: TrieContent> {
 }
 
 impl<M: TrieMarker, C: TrieContent> Serialize for LogOp<M, C> {
-    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes = self.op.serialize(bytes);
-        bytes = self.undos.serialize(bytes);
-        bytes
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        serializer = self.op.serialize(serializer);
+        serializer = self.undos.serialize(serializer);
+        serializer
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(self.op.byte_size()? + self.undos.byte_size()?)
     }
 }
 
@@ -471,11 +528,17 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DB> std::ops::Deref for Trie<M, C, D
     }
 }
 
-pub struct TrieUpdater<M: TrieMarker, C: TrieContent, DBImpl: DBTransaction> {
+pub struct TrieUpdater<M: TrieMarker, C: TrieContent, DBImpl> {
     writer: TrieStoreWriter<DBImpl, M, C>,
 }
 
-impl<M: TrieMarker, C: TrieContent, DBImpl: DBTransaction> TrieUpdater<M, C, DBImpl> {
+impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdater<M, C, DBImpl> {
+    pub fn from_db(db: DBImpl) -> Self {
+        TrieUpdater {
+            writer: TrieStoreWriter::from_db(db),
+        }
+    }
+
     fn move_node(
         &mut self,
         id: TrieId,
@@ -666,9 +729,16 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBTransaction> TrieUpdater<M, C, DBI
 
         Ok(self)
     }
+}
 
+impl<M: TrieMarker, C: TrieContent, DBImpl: DBTransaction> TrieUpdater<M, C, DBImpl> {
     pub fn commit(self) -> Result<()> {
         self.writer.commit()?;
+        Ok(())
+    }
+
+    pub fn rollback(self) -> Result<()> {
+        self.writer.rollback()?;
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use rocksdb::OptimisticTransactionDB;
 
-use crate::{DBRead, DBTransaction, DBWrite, Error, Result, DB};
+use crate::{DBLock, DBRead, DBTransaction, DBWrite, Error, Result, DB};
 
 #[derive(Debug)]
 pub struct RocksDB {
@@ -16,7 +16,7 @@ impl RocksDB {
         Ok(Self { db })
     }
 
-    pub fn drop_all(&mut self) -> Result<()> {
+    pub fn clear(&mut self) -> Result<()> {
         for item in self.db.iterator(rocksdb::IteratorMode::Start) {
             self.db.delete(item?.0)?;
         }
@@ -172,6 +172,19 @@ impl DBWrite for RocksDBTransaction<'_> {
     }
 }
 
+impl DBLock for RocksDBTransaction<'_> {
+    type ValueBytes<'a> = RocksDBBytes<'a>
+    where
+        Self: 'a;
+
+    fn get_for_update(&self, key: impl AsRef<[u8]>) -> Result<Option<Self::ValueBytes<'_>>> {
+        Ok(self
+            .transaction
+            .get_for_update(key, true)?
+            .map(|v| RocksDBBytes::Owned(v.into())))
+    }
+}
+
 impl DBTransaction for RocksDBTransaction<'_> {
     fn rollback(self) -> Result<()> {
         self.transaction.rollback()?;
@@ -181,12 +194,5 @@ impl DBTransaction for RocksDBTransaction<'_> {
     fn commit(self) -> Result<()> {
         self.transaction.commit()?;
         Ok(())
-    }
-
-    fn get_for_update(&self, key: impl AsRef<[u8]>) -> Result<Option<Self::ValueBytes<'_>>> {
-        Ok(self
-            .transaction
-            .get_for_update(key, true)?
-            .map(|v| RocksDBBytes::Owned(v.into())))
     }
 }

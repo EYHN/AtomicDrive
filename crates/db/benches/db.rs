@@ -1,3 +1,4 @@
+use bumpalo::Bump;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use db::{
     backend::{memory::MemoryDB, rocks::RocksDB},
@@ -43,8 +44,22 @@ fn criterion_benchmark(c: &mut Criterion) {
                 i += 1;
             })
         });
+        group.bench_function("MemoryDB with bump alloc", |b| {
+            let bump = Bump::new();
+
+            let db = MemoryDB::new_in(&bump);
+            let mut i = 0;
+            b.iter(|| {
+                let mut writer = db.start_transaction().unwrap();
+                writer
+                    .set(usize::to_be_bytes(i), usize::to_be_bytes(i))
+                    .unwrap();
+                writer.commit().unwrap();
+                i += 1;
+            })
+        });
         group.bench_function("RocksDB", |b| {
-            rocks_db.drop_all().unwrap();
+            rocks_db.clear().unwrap();
             let mut i = 0;
             b.iter(|| {
                 let mut writer = rocks_db.start_transaction().unwrap();
@@ -100,7 +115,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             })
         });
         group.bench_function("RocksDB", |b| {
-            rocks_db.drop_all().unwrap();
+            rocks_db.clear().unwrap();
             let mut writer = rocks_db.start_transaction().unwrap();
             for i in 0..10000 {
                 writer

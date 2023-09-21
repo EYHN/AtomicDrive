@@ -11,6 +11,7 @@ parking_lot = "0.12.1"
 [dev-dependencies]
 criterion = { version = "0.4", features = ["html_reports"] }
 test-results = "0.1.2"
+bumpalo = { version = "3", features = ["allocator_api"] }
 
 [[bench]]
 name = "db"

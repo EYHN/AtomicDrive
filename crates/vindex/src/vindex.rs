@@ -15,7 +15,7 @@ pub struct Actor {
 }
 
 impl Serialize for Actor {
-    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
         Vec::<u8>::serialize(&self.peer_id.to_bytes(), bytes)
     }
 }
@@ -41,7 +41,7 @@ pub struct Marker {
 }
 
 impl Serialize for Marker {
-    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
         bytes = self.clock.dots.serialize(bytes);
         bytes = self.timestamp.serialize(bytes);
         bytes = self.peer_id.serialize(bytes);
@@ -79,7 +79,7 @@ pub enum Entity {
 }
 
 impl Serialize for Entity {
-    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
         todo!()
     }
 }

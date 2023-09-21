@@ -2,10 +2,10 @@ use std::{borrow::Borrow, collections::VecDeque, fmt::Debug};
 
 use crate::trie::{Error as TrieError, Op as TrieOp, Trie, TrieUpdater};
 use chunk::HashChunks;
-use crdts::VClock;
+use crdts::{CvRDT, VClock};
 use db::backend::memory::{MemoryDB, MemoryDBTransaction};
 use thiserror::Error;
-use utils::{Deserialize, Digestible, Serialize};
+use utils::{Deserialize, Digestible, Serialize, Serializer};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -23,8 +23,12 @@ pub struct Actor {
 }
 
 impl Serialize for Actor {
-    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
-        Vec::<u8>::serialize(&self.peer_id.to_bytes(), bytes)
+    fn serialize(&self, serializer: Serializer) -> Serializer {
+        Vec::<u8>::serialize(&self.peer_id.to_bytes(), serializer)
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(self.peer_id.to_bytes().len())
     }
 }
 
@@ -49,11 +53,15 @@ pub struct Marker {
 }
 
 impl Serialize for Marker {
-    fn serialize(&self, mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes = self.clock.dots.serialize(bytes);
-        bytes = self.timestamp.serialize(bytes);
-        bytes = self.actor.serialize(bytes);
-        bytes
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        serializer = self.clock.dots.serialize(serializer);
+        serializer = self.timestamp.serialize(serializer);
+        serializer = self.actor.serialize(serializer);
+        serializer
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(self.clock.dots.byte_size()? + self.timestamp.byte_size()? + self.actor.byte_size()?)
     }
 }
 
@@ -87,7 +95,11 @@ pub enum Entity {
 }
 
 impl Serialize for Entity {
-    fn serialize(&self, bytes: Vec<u8>) -> Vec<u8> {
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        todo!()
+    }
+
+    fn byte_size(&self) -> Option<usize> {
         todo!()
     }
 }
@@ -115,7 +127,6 @@ type Op = TrieOp<Marker, Entity>;
 #[derive(Clone)]
 pub struct VIndex {
     db: MemoryDB,
-    clock: VClock<Actor>,
 }
 
 impl VIndex {
@@ -225,16 +236,23 @@ impl<'a> VIndexTransaction<'a> {
         todo!()
     }
 
-    fn trie(&mut self) -> TrieUpdater<Marker, Entity, &'_ MemoryDBTransaction<'a>> {
-
-    }
-
     fn update_clock(&self, new_clock: VClock<Actor>) -> Result<()> {
-
+        todo!()
     }
 
-    fn apply(&mut self, ops: Vec<Op>) {
-        self.db.
+    fn trie(&mut self) -> TrieUpdater<Marker, Entity, &'_ mut MemoryDBTransaction<'a>> {
+        TrieUpdater::from_db(&mut self.db)
+    }
+
+    fn apply(&mut self, ops: Vec<Op>) -> Result<()> {
+        let mut clock = self.clock();
+        for op in ops.iter() {
+            clock.merge(op.marker.clock.clone())
+        }
+        self.update_clock(clock)?;
+        self.trie().apply(ops)?;
+
+        Ok(())
     }
 }
 

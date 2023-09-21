@@ -1,4 +1,6 @@
-#![feature(macro_metavar_expr)]
+#![feature(allocator_api)]
+#![feature(btreemap_alloc)]
+#![feature(macro_metavar_expr)] // for the macro in tests.rs
 
 pub mod backend;
 
@@ -54,6 +56,29 @@ impl<T: DBRead> DBRead for &T {
     }
 }
 
+impl<T: DBRead> DBRead for &mut T {
+    type KeyBytes<'a> = T::KeyBytes<'a>
+    where
+        Self: 'a;
+    type ValueBytes<'a> = T::ValueBytes<'a>
+    where
+        Self: 'a;
+    fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Self::ValueBytes<'_>>> {
+        T::get(self, key)
+    }
+
+    fn has(&self, key: impl AsRef<[u8]>) -> Result<bool> {
+        T::has(self, key)
+    }
+
+    type IterRange<'a> = T::IterRange<'a>
+    where
+        Self: 'a;
+    fn get_range(&self, from: impl AsRef<[u8]>, to: impl AsRef<[u8]>) -> Self::IterRange<'_> {
+        T::get_range(self, from, to)
+    }
+}
+
 pub trait DBReadDyn {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
@@ -87,6 +112,16 @@ pub trait DBWrite {
     fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<()>;
 }
 
+impl<T: DBWrite> DBWrite for &mut T {
+    fn set(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
+        T::set(self, key, value)
+    }
+
+    fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<()> {
+        T::delete(self, key)
+    }
+}
+
 pub trait DBWriteDyn {
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
 
@@ -103,33 +138,63 @@ impl<T: DBWrite> DBWriteDyn for T {
     }
 }
 
-pub trait DBTransaction: DBWrite + DBRead {
-    fn get_for_update(&self, key: impl AsRef<[u8]>) -> Result<Option<Self::ValueBytes<'_>>>;
+pub trait DBLock {
+    type ValueBytes<'a>: AsRef<[u8]>
+    where
+        Self: 'a;
 
+    fn get_for_update(&self, key: impl AsRef<[u8]>) -> Result<Option<Self::ValueBytes<'_>>>;
+}
+
+impl<T: DBLock> DBLock for &T {
+    type ValueBytes<'a> = T::ValueBytes<'a>
+    where
+        Self: 'a;
+
+    fn get_for_update(&self, key: impl AsRef<[u8]>) -> Result<Option<Self::ValueBytes<'_>>> {
+        T::get_for_update(self, key)
+    }
+}
+
+impl<T: DBLock> DBLock for &mut T {
+    type ValueBytes<'a> = T::ValueBytes<'a>
+    where
+        Self: 'a;
+
+    fn get_for_update(&self, key: impl AsRef<[u8]>) -> Result<Option<Self::ValueBytes<'_>>> {
+        T::get_for_update(self, key)
+    }
+}
+
+pub trait DBLockDyn {
+    fn get_for_update(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+}
+
+impl<T: DBLock> DBLockDyn for T {
+    fn get_for_update(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        DBLock::get_for_update(self, key).map(|v| v.map(|v| v.as_ref().to_vec()))
+    }
+}
+
+pub trait DBTransaction: DBWrite + DBRead + DBLock {
     fn rollback(self) -> Result<()>;
 
     fn commit(self) -> Result<()>;
 }
 
-pub trait DBTransactionDyn: DBWriteDyn + DBReadDyn {
-    fn get_for_update(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
-
+pub trait DBTransactionDyn: DBWriteDyn + DBReadDyn + DBLockDyn {
     fn rollback(self) -> Result<()>;
 
     fn commit(self) -> Result<()>;
 }
 
 impl<T: DBTransaction> DBTransactionDyn for T {
-    fn get_for_update(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        DBTransaction::get_for_update(self, key).map(|v| v.map(|v| v.as_ref().to_vec()))
-    }
-
     fn rollback(self) -> Result<()> {
-        todo!()
+        self.rollback()
     }
 
     fn commit(self) -> Result<()> {
-        todo!()
+        self.commit()
     }
 }
 
