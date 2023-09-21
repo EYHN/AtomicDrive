@@ -42,7 +42,7 @@ jobs:
       - name: Build Benchmark
         run: |
           cargo codspeed build --features codspeed -p db
-          cargo codspeed build --features codspeed -p db
+          cargo codspeed build --features codspeed -p trie
 
       - name: Run benchmark
         uses: CodSpeedHQ/action@v1
