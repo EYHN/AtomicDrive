@@ -29,7 +29,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 writer.apply(ops).unwrap();
                 writer.commit().unwrap();
             },
-            criterion::BatchSize::SmallInput,
+            BatchSize::SmallInput,
         )
     });
     c.bench_function(
@@ -74,7 +74,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                     writer.apply(ops).unwrap();
                     writer.commit().unwrap();
                 },
-                criterion::BatchSize::SmallInput,
+                BatchSize::SmallInput,
             )
         },
     );

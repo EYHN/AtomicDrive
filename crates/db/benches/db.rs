@@ -73,6 +73,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 i += 1;
             })
         });
+        group.finish()
     }
 
     {
@@ -131,6 +132,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 rocks_db.get(black_box(&target)).unwrap();
             })
         });
+        group.finish()
     }
 }
 
