@@ -1,4 +1,7 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+#[cfg(not(codspeed))]
+pub use criterion::*;
+#[cfg(codspeed)]
+pub use codspeed_criterion_compat::*;
 use db::backend::memory::MemoryDB;
 use trie::trie::{Op, Trie, TrieKey, TrieRef};
 
