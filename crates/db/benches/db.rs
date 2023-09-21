@@ -1,5 +1,8 @@
 use bumpalo::Bump;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+#[cfg(not(codspeed))]
+pub use criterion::*;
+#[cfg(codspeed)]
+pub use codspeed_criterion_compat::*;
 use db::{
     backend::{memory::MemoryDB, rocks::RocksDB},
     DBRead, DBTransaction, DBWrite, DB,

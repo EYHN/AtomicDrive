@@ -10,8 +10,12 @@ parking_lot = "0.12.1"
 
 [dev-dependencies]
 criterion = { version = "0.4", features = ["html_reports"] }
+codspeed-criterion-compat = { version = "2.2.0" }
 test-results = "0.1.2"
 bumpalo = { version = "3", features = ["allocator_api"] }
+
+[features]
+codspeed = []
 
 [[bench]]
 name = "db"
