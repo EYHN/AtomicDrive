@@ -44,11 +44,6 @@ impl<A: Allocator + Clone> MemoryDB<A> {
             alloc,
         }
     }
-
-    pub fn clear(&mut self) -> Result<()> {
-        self.map.write().clear();
-        Ok(())
-    }
 }
 
 impl<A: Allocator + Clone> DBRead for MemoryDB<A> {
@@ -197,5 +192,10 @@ impl<A: Allocator + Clone> DB for MemoryDB<A> {
             alloc: self.alloc.clone(),
             rollback: Vec::with_capacity_in(8, self.alloc.clone()),
         })
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        self.map.write().clear();
+        Ok(())
     }
 }

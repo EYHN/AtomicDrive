@@ -15,13 +15,6 @@ impl RocksDB {
         let db = OptimisticTransactionDB::open(&opts, path)?;
         Ok(Self { db })
     }
-
-    pub fn clear(&mut self) -> Result<()> {
-        for item in self.db.iterator(rocksdb::IteratorMode::Start) {
-            self.db.delete(item?.0)?;
-        }
-        Ok(())
-    }
 }
 
 pub enum RocksDBBytes<'a> {
@@ -90,6 +83,13 @@ impl DB for RocksDB {
         Ok(RocksDBTransaction {
             transaction: self.db.transaction(),
         })
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        for item in self.db.iterator(rocksdb::IteratorMode::Start) {
+            self.db.delete(item?.0)?;
+        }
+        Ok(())
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{backend, DBReadDyn, DBTransaction, DBWrite, Result, DB};
+use crate::{backend, DBTransaction, DBWrite, Result, DB};
 
 macro_rules! testing {
     (@db: $($db:ident)* ,@tests: $($test:ident)*) => {
@@ -21,11 +21,12 @@ macro_rules! testing {
 #[test]
 fn test_db() -> Result<()> {
     let mut memory_db = backend::memory::MemoryDB::default();
+    let mut memory_db_with_prefix = memory_db.clone().prefix("iii");
     let mut rocks_db =
         backend::rocks::RocksDB::open_or_create_database(test_results::save_dir!("rocks"))?;
 
     testing!(
-        @db: rocks_db memory_db,
+        @db: rocks_db memory_db memory_db_with_prefix,
         @tests: basic_write get_range rollback
     );
 

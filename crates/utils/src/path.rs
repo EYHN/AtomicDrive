@@ -430,6 +430,7 @@ impl PathTools {
         if path.starts_with(Self::DIRECTORY_SEPARATOR_CHAR) {
             path.split(Self::DIRECTORY_SEPARATOR_CHAR).skip(1)
         } else {
+            #[allow(clippy::iter_skip_zero)]
             path.split(Self::DIRECTORY_SEPARATOR_CHAR).skip(0)
         }
     }

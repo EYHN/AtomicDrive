@@ -3,7 +3,11 @@
 #![feature(macro_metavar_expr)] // for the macro in tests.rs
 
 pub mod backend;
+pub mod prefix;
 
+use std::alloc::Allocator;
+
+use prefix::Prefix;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -204,6 +208,23 @@ pub trait DB: DBRead {
         Self: 'a;
 
     fn start_transaction(&self) -> Result<Self::Transaction<'_>>;
+
+    /// for debug purpose
+    fn clear(&mut self) -> Result<()>;
+
+    fn prefix(self, prefix: impl AsRef<[u8]>) -> Prefix<Self>
+    where
+        Self: std::marker::Sized,
+    {
+        Prefix::new(self, prefix)
+    }
+
+    fn prefix_in<A: Allocator + Clone>(self, prefix: impl AsRef<[u8]>, alloc: A) -> Prefix<Self, A>
+    where
+        Self: std::marker::Sized,
+    {
+        Prefix::new_in(self, prefix, alloc)
+    }
 }
 
 impl<T: DB> DB for &T {
@@ -214,10 +235,26 @@ impl<T: DB> DB for &T {
     fn start_transaction(&self) -> Result<Self::Transaction<'_>> {
         T::start_transaction(self)
     }
+
+    fn clear(&mut self) -> Result<()> {
+        unreachable!()
+    }
 }
 
 pub trait DBDyn: DBReadDyn {
     fn start_transaction(&self) -> Result<Box<dyn DBTransactionDyn + '_>>;
+
+    fn clear(&mut self) -> Result<()>;
+}
+
+impl<T: DB> DBDyn for T {
+    fn start_transaction(&self) -> Result<Box<dyn DBTransactionDyn + '_>> {
+        Ok(Box::new(T::start_transaction(&self)?))
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        T::clear(self)
+    }
 }
 
 #[cfg(test)]
