@@ -3,12 +3,16 @@ use std::{borrow::Borrow, collections::VecDeque, fmt::Debug};
 use crate::trie::{Error as TrieError, Op as TrieOp, Trie, TrieUpdater};
 use chunk::HashChunks;
 use crdts::{CvRDT, VClock};
-use db::backend::memory::{MemoryDB, MemoryDBTransaction};
+use db::{backend::memory::MemoryDBTransaction, DBLock, DBRead, DBTransaction, DBWrite, DB};
 use thiserror::Error;
 use utils::{Deserialize, Digestible, Serialize, Serializer};
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("Invalid Operation, {0}")]
+    InvalidOp(String),
+    #[error("Decode error, {0}")]
+    DecodeError(String),
     #[error("Trie error")]
     TrieError(#[from] TrieError),
     #[error("db error")]
@@ -124,14 +128,28 @@ impl Default for Entity {
 
 type Op = TrieOp<Marker, Entity>;
 
+const DB_TRIE_PREFIX: &[u8] = b"trie:";
+const CLOCK_KEY: &[u8] = b"current_vclock";
+
 #[derive(Clone)]
-pub struct VIndex {
-    db: MemoryDB,
+pub struct VIndex<DBImpl: DB> {
+    db: DBImpl,
 }
 
-impl VIndex {
-    fn trie(&self) -> Trie<Marker, Entity, &'_ MemoryDB> {
-        Trie::from_db(&self.db)
+impl<DBImpl: DB> VIndex<DBImpl> {
+    pub fn clock(&self) -> Result<VClock<Actor>> {
+        let bytes = self
+            .db
+            .get(CLOCK_KEY)?
+            .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?;
+
+        Ok(VClock {
+            dots: <_>::from_bytes(bytes.as_ref()).map_err(Error::DecodeError)?,
+        })
+    }
+
+    fn trie(&self) -> Trie<Marker, Entity, db::prefix::Prefix<&'_ DBImpl>> {
+        Trie::from_db(db::DB::prefix(&self.db, DB_TRIE_PREFIX))
     }
 
     pub fn ops_after(&self, after: &VClock<Actor>) -> impl Iterator<Item = Op> {
@@ -227,25 +245,38 @@ impl VIndex {
     // }
 }
 
-pub struct VIndexTransaction<'a> {
-    db: MemoryDBTransaction<'a>,
+pub struct VIndexTransaction<DBImpl: DBTransaction> {
+    db: DBImpl,
 }
 
-impl<'a> VIndexTransaction<'a> {
-    pub fn clock(&self) -> VClock<Actor> {
-        todo!()
+impl<DBImpl: DBTransaction> VIndexTransaction<DBImpl> {
+    pub fn clock(&self) -> Result<VClock<Actor>> {
+        let bytes = self
+            .db
+            .get_for_update(CLOCK_KEY)?
+            .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?;
+
+        Ok(VClock {
+            dots: <_>::from_bytes(bytes.as_ref()).map_err(Error::DecodeError)?,
+        })
     }
 
-    fn update_clock(&self, new_clock: VClock<Actor>) -> Result<()> {
-        todo!()
+    fn update_clock(&mut self, new_clock: VClock<Actor>) -> Result<()> {
+        let bytes = new_clock.dots.to_bytes();
+
+        self.db.set(CLOCK_KEY, bytes)?;
+
+        Ok(())
     }
 
-    fn trie(&mut self) -> TrieUpdater<Marker, Entity, &'_ mut MemoryDBTransaction<'a>> {
-        TrieUpdater::from_db(&mut self.db)
+    fn trie(
+        &mut self,
+    ) -> TrieUpdater<Marker, Entity, db::prefix::PrefixTransaction<&'_ mut DBImpl>> {
+        TrieUpdater::from_db(DBTransaction::prefix(&mut self.db, DB_TRIE_PREFIX))
     }
 
     fn apply(&mut self, ops: Vec<Op>) -> Result<()> {
-        let mut clock = self.clock();
+        let mut clock = self.clock()?;
         for op in ops.iter() {
             clock.merge(op.marker.clock.clone())
         }

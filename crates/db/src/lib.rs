@@ -7,7 +7,7 @@ pub mod prefix;
 
 use std::alloc::Allocator;
 
-use prefix::Prefix;
+use prefix::{Prefix, PrefixTransaction};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -184,6 +184,24 @@ pub trait DBTransaction: DBWrite + DBRead + DBLock {
     fn rollback(self) -> Result<()>;
 
     fn commit(self) -> Result<()>;
+
+    fn prefix(self, prefix: impl AsRef<[u8]>) -> PrefixTransaction<Self>
+    where
+        Self: std::marker::Sized,
+    {
+        PrefixTransaction::new(self, prefix)
+    }
+
+    fn prefix_in<A: Allocator + Clone>(
+        self,
+        prefix: impl AsRef<[u8]>,
+        alloc: A,
+    ) -> PrefixTransaction<Self, A>
+    where
+        Self: std::marker::Sized,
+    {
+        PrefixTransaction::new_in(self, prefix, alloc)
+    }
 }
 
 pub trait DBTransactionDyn: DBWriteDyn + DBReadDyn + DBLockDyn {
@@ -249,7 +267,7 @@ pub trait DBDyn: DBReadDyn {
 
 impl<T: DB> DBDyn for T {
     fn start_transaction(&self) -> Result<Box<dyn DBTransactionDyn + '_>> {
-        Ok(Box::new(T::start_transaction(&self)?))
+        Ok(Box::new(T::start_transaction(self)?))
     }
 
     fn clear(&mut self) -> Result<()> {
