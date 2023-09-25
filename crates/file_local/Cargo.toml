@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 file = { path = "../file" }
 utils = { path = "../utils" }
+trie = { path = "../trie" }
+db = { path = "../db" }
 notify = { version = "5.1.0", features = ["serde"] }
 rocksdb = { version = "0.21", features = ["lz4"], default-features = false }
 parking_lot = "0.12.1"

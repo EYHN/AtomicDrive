@@ -121,12 +121,12 @@ impl<DBImpl: DBRead, A: Allocator + Clone> DBRead for Prefix<DBImpl, A> {
 }
 
 impl<DBImpl: DB, A: Allocator + Clone> DB for Prefix<DBImpl, A> {
-    type Transaction<'a> = PrefixTransaction<DBImpl::Transaction<'a>, A>
+    type Transaction<'a> = Prefix<DBImpl::Transaction<'a>, A>
     where
         Self: 'a;
 
     fn start_transaction(&self) -> crate::Result<Self::Transaction<'_>> {
-        Ok(PrefixTransaction {
+        Ok(Prefix {
             db: self.db.start_transaction()?,
             prefix: self.prefix.clone(),
             alloc: self.alloc.clone(),
@@ -138,73 +138,7 @@ impl<DBImpl: DB, A: Allocator + Clone> DB for Prefix<DBImpl, A> {
     }
 }
 
-pub struct PrefixTransaction<DBImpl, A: Allocator + Clone = Global> {
-    db: DBImpl,
-    prefix: Box<[u8], A>,
-    alloc: A,
-}
-
-impl<DBImpl, A: Allocator + Clone> PrefixTransaction<DBImpl, A> {
-    pub fn new_in(db: DBImpl, prefix: impl AsRef<[u8]>, alloc: A) -> Self {
-        Self {
-            db,
-            prefix: prefix.as_ref().to_vec_in(alloc.clone()).into(),
-            alloc,
-        }
-    }
-}
-
-impl<DBImpl> PrefixTransaction<DBImpl> {
-    pub fn new(db: DBImpl, prefix: impl AsRef<[u8]>) -> Self {
-        Self {
-            db,
-            prefix: prefix.as_ref().to_vec().into(),
-            alloc: Default::default(),
-        }
-    }
-}
-
-impl<DBImpl: DBRead, A: Allocator + Clone> DBRead for PrefixTransaction<DBImpl, A> {
-    type KeyBytes<'a> = PrefixKey<'a, DBImpl::KeyBytes<'a>>
-    where
-        Self: 'a;
-
-    type ValueBytes<'a> = DBImpl::ValueBytes<'a>
-    where
-        Self: 'a;
-
-    fn get(&self, key: impl AsRef<[u8]>) -> crate::Result<Option<Self::ValueBytes<'_>>> {
-        self.db.get(concat_prefix(
-            &self.prefix,
-            key.as_ref(),
-            self.alloc.clone(),
-        ))
-    }
-
-    fn has(&self, key: impl AsRef<[u8]>) -> crate::Result<bool> {
-        self.db.has(concat_prefix(
-            &self.prefix,
-            key.as_ref(),
-            self.alloc.clone(),
-        ))
-    }
-
-    type IterRange<'a> = PrefixRangeIter<'a, DBImpl::KeyBytes<'a>, DBImpl::ValueBytes<'a> ,DBImpl::IterRange<'a>>
-    where
-        Self: 'a;
-
-    fn get_range(&self, from: impl AsRef<[u8]>, to: impl AsRef<[u8]>) -> Self::IterRange<'_> {
-        PrefixRangeIter {
-            iter: self.db.get_range(
-                concat_prefix(&self.prefix, from.as_ref(), self.alloc.clone()),
-                concat_prefix(&self.prefix, to.as_ref(), self.alloc.clone()),
-            ),
-            prefix: &self.prefix,
-        }
-    }
-}
-
-impl<DBImpl: DBLock, A: Allocator + Clone> DBLock for PrefixTransaction<DBImpl, A> {
+impl<DBImpl: DBLock, A: Allocator + Clone> DBLock for Prefix<DBImpl, A> {
     type ValueBytes<'a> = DBImpl::ValueBytes<'a>
     where
         Self: 'a;
@@ -218,7 +152,7 @@ impl<DBImpl: DBLock, A: Allocator + Clone> DBLock for PrefixTransaction<DBImpl, 
     }
 }
 
-impl<DBImpl: DBWrite, A: Allocator + Clone> DBWrite for PrefixTransaction<DBImpl, A> {
+impl<DBImpl: DBWrite, A: Allocator + Clone> DBWrite for Prefix<DBImpl, A> {
     fn set(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> crate::Result<()> {
         self.db.set(
             concat_prefix(&self.prefix, key.as_ref(), self.alloc.clone()),
@@ -235,7 +169,7 @@ impl<DBImpl: DBWrite, A: Allocator + Clone> DBWrite for PrefixTransaction<DBImpl
     }
 }
 
-impl<DBImpl: DBTransaction, A: Allocator + Clone> DBTransaction for PrefixTransaction<DBImpl, A> {
+impl<DBImpl: DBTransaction, A: Allocator + Clone> DBTransaction for Prefix<DBImpl, A> {
     fn rollback(self) -> crate::Result<()> {
         self.db.rollback()
     }

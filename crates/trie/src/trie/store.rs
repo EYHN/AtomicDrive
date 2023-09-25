@@ -631,7 +631,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     }
 }
 
-pub struct TrieStoreWriter<DBImpl, M: TrieMarker, C: TrieContent> {
+pub struct TrieStoreWriter<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent> {
     transaction: DBImpl,
     cache_log_total_len: Option<u64>,
     cache_inc_id: Option<TrieId>,

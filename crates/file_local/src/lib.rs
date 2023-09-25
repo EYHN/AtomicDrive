@@ -10,6 +10,7 @@ use memmap2::Mmap;
 use parking_lot::Mutex;
 use utils::PathTools;
 
+mod new_tracker;
 mod tracker;
 mod walker;
 pub mod watcher;

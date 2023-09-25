@@ -7,7 +7,7 @@ pub mod prefix;
 
 use std::alloc::Allocator;
 
-use prefix::{Prefix, PrefixTransaction};
+use prefix::Prefix;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -185,22 +185,18 @@ pub trait DBTransaction: DBWrite + DBRead + DBLock {
 
     fn commit(self) -> Result<()>;
 
-    fn prefix(self, prefix: impl AsRef<[u8]>) -> PrefixTransaction<Self>
+    fn prefix(self, prefix: impl AsRef<[u8]>) -> Prefix<Self>
     where
         Self: std::marker::Sized,
     {
-        PrefixTransaction::new(self, prefix)
+        Prefix::new(self, prefix)
     }
 
-    fn prefix_in<A: Allocator + Clone>(
-        self,
-        prefix: impl AsRef<[u8]>,
-        alloc: A,
-    ) -> PrefixTransaction<Self, A>
+    fn prefix_in<A: Allocator + Clone>(self, prefix: impl AsRef<[u8]>, alloc: A) -> Prefix<Self, A>
     where
         Self: std::marker::Sized,
     {
-        PrefixTransaction::new_in(self, prefix, alloc)
+        Prefix::new_in(self, prefix, alloc)
     }
 }
 

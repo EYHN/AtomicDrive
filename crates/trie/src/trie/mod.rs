@@ -528,7 +528,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DB> std::ops::Deref for Trie<M, C, D
     }
 }
 
-pub struct TrieUpdater<M: TrieMarker, C: TrieContent, DBImpl> {
+pub struct TrieUpdater<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> {
     writer: TrieStoreWriter<DBImpl, M, C>,
 }
 
@@ -743,13 +743,21 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBTransaction> TrieUpdater<M, C, DBI
     }
 }
 
-impl<M: TrieMarker, C: TrieContent, DBImpl: DBTransaction> std::ops::Deref
+impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> std::ops::Deref
     for TrieUpdater<M, C, DBImpl>
 {
     type Target = TrieStoreWriter<DBImpl, M, C>;
 
     fn deref(&self) -> &Self::Target {
         &self.writer
+    }
+}
+
+impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> std::ops::DerefMut
+    for TrieUpdater<M, C, DBImpl>
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writer
     }
 }
 

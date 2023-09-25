@@ -22,6 +22,12 @@ impl FileFullPath {
         }
     }
 
+    pub fn dirname(&self) -> FileFullPath {
+        FileFullPath {
+            value: PathTools::dirname(&self.value).to_string(),
+        }
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         self.value.as_bytes()
     }

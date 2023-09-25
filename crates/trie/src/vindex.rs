@@ -1,9 +1,12 @@
 use std::{borrow::Borrow, collections::VecDeque, fmt::Debug};
 
-use crate::trie::{Error as TrieError, Op as TrieOp, Trie, TrieUpdater};
+use crate::trie::{Error as TrieError, Op as TrieOp, Trie, TrieRef, TrieUpdater};
 use chunk::HashChunks;
 use crdts::{CvRDT, VClock};
-use db::{backend::memory::MemoryDBTransaction, DBLock, DBRead, DBTransaction, DBWrite, DB};
+use db::{
+    backend::memory::MemoryDBTransaction, prefix::Prefix, DBLock, DBRead, DBTransaction, DBWrite,
+    DB,
+};
 use thiserror::Error;
 use utils::{Deserialize, Digestible, Serialize, Serializer};
 
@@ -269,10 +272,8 @@ impl<DBImpl: DBTransaction> VIndexTransaction<DBImpl> {
         Ok(())
     }
 
-    fn trie(
-        &mut self,
-    ) -> TrieUpdater<Marker, Entity, db::prefix::PrefixTransaction<&'_ mut DBImpl>> {
-        TrieUpdater::from_db(DBTransaction::prefix(&mut self.db, DB_TRIE_PREFIX))
+    fn trie(&mut self) -> TrieUpdater<Marker, Entity, db::prefix::Prefix<&'_ mut DBImpl>> {
+        TrieUpdater::from_db(Prefix::new(&mut self.db, DB_TRIE_PREFIX))
     }
 
     fn apply(&mut self, ops: Vec<Op>) -> Result<()> {
