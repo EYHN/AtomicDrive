@@ -13,6 +13,7 @@ rocksdb = { version = "0.21", features = ["lz4"], default-features = false }
 parking_lot = "0.12.1"
 dunce = "1.0.4"
 memmap2 = "0.6.2"
+thiserror = "1.0"
 
 [dev-dependencies]
 test-results = "0.1.2"

@@ -8,7 +8,7 @@ use trie::trie::{Op, Trie, TrieKey, TrieRef};
 fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("[db backend] trie apply 100 ops ordered", |b| {
         let mut trie = Trie::init(MemoryDB::default()).unwrap();
-        let mut i = 0;
+        let mut i = 0u64;
         b.iter_batched(
             || {
                 (0..100)
@@ -19,7 +19,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                             parent_ref: TrieRef::from(0),
                             child_key: TrieKey(format!("{}", i)),
                             child_ref: TrieRef::from(i as u128),
-                            child_content: i,
+                            child_content: Some(i),
                         }
                     })
                     .collect::<Vec<_>>()
@@ -48,7 +48,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                                 parent_ref: TrieRef::from(0),
                                 child_key: TrieKey(format!("{}", i)),
                                 child_ref: TrieRef::from(i as u128),
-                                child_content: 0,
+                                child_content: Some(0),
                             }
                         })
                         .collect::<Vec<_>>(),
@@ -65,7 +65,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                             parent_ref: TrieRef::from(0),
                             child_key: TrieKey(format!("{}", i)),
                             child_ref: TrieRef::from(i as u128),
-                            child_content: i,
+                            child_content: Some(i),
                         }
                     }]
                 },

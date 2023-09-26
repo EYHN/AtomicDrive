@@ -8,7 +8,7 @@ macro_rules! testing {
                     $(
                         $$db.clear()?;
                         println!("Starting run test {} for {}", stringify!($test), stringify!($$db));
-                        $test(&$$db)?;
+                        $test(&mut $$db)?;
                     )*
                 };
             }
@@ -33,7 +33,7 @@ fn test_db() -> Result<()> {
     Ok(())
 }
 
-fn basic_write<D: DB>(db: &D) -> Result<()> {
+fn basic_write<D: DB>(db: &mut D) -> Result<()> {
     assert!(db.get(*b"test")?.is_none());
 
     let mut t = db.start_transaction()?;
@@ -47,7 +47,7 @@ fn basic_write<D: DB>(db: &D) -> Result<()> {
     Ok(())
 }
 
-fn get_range<D: DB>(db: &D) -> Result<()> {
+fn get_range<D: DB>(db: &mut D) -> Result<()> {
     let mut t = db.start_transaction()?;
 
     t.set(*b"100", *b"0")?;
@@ -77,7 +77,7 @@ fn get_range<D: DB>(db: &D) -> Result<()> {
     Ok(())
 }
 
-fn rollback<D: DB>(db: &D) -> Result<()> {
+fn rollback<D: DB>(db: &mut D) -> Result<()> {
     let mut t = db.start_transaction()?;
     t.set(*b"100", *b"0")?;
     t.set(*b"101", *b"1")?;

@@ -4,7 +4,7 @@ use std::{borrow::Borrow, cmp::Ordering, fmt::Display, marker::PhantomData};
 
 use db::{DBLock, DBRead, DBTransaction, DBWrite, DB};
 use std::fmt::Debug;
-use store::{TrieStore, TrieStoreWriter};
+use store::{TrieStore, TrieStoreTransaction};
 use thiserror::Error;
 use utils::{tree_stringify, Deserialize, Digestible, Serialize, Serializer};
 use uuid::Uuid;
@@ -29,14 +29,18 @@ pub enum TrieDiff {
     Moved(Option<TrieId>, Option<TrieId>),
 }
 
-pub trait TrieContent: Clone + Hash + Default + Digestible + Serialize + Deserialize {}
-impl<T: Clone + Hash + Default + Digestible + Serialize + Deserialize> TrieContent for T {}
+pub trait TrieContent: Clone + Default + Digestible + Serialize + Deserialize {}
+impl<T: Clone + Default + Digestible + Serialize + Deserialize> TrieContent for T {}
 
-pub trait TrieMarker: PartialOrd + Clone + Hash + Serialize + Deserialize {}
-impl<A: PartialOrd + Clone + Hash + Serialize + Deserialize> TrieMarker for A {}
+pub trait TrieMarker: PartialOrd + Clone + Serialize + Deserialize {}
+impl<A: PartialOrd + Clone + Serialize + Deserialize> TrieMarker for A {}
 
 pub const ROOT: TrieId = TrieId(0u64.to_be_bytes());
 pub const CONFLICT: TrieId = TrieId(1u64.to_be_bytes());
+pub const RECYCLE: TrieId = TrieId(2u64.to_be_bytes());
+pub const ROOT_REF: TrieRef = TrieRef(0u128.to_be_bytes());
+pub const CONFLICT_REF: TrieRef = TrieRef(1u128.to_be_bytes());
+pub const RECYCLE_REF: TrieRef = TrieRef(2u128.to_be_bytes());
 
 /// Tree node id
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
@@ -63,7 +67,7 @@ impl TrieId {
 }
 
 impl Serialize for TrieId {
-    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+    fn serialize(&self, serializer: Serializer) -> Serializer {
         self.0.serialize(serializer)
     }
 
@@ -96,7 +100,7 @@ impl TrieKey {
 }
 
 impl Serialize for TrieKey {
-    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+    fn serialize(&self, serializer: Serializer) -> Serializer {
         self.0.serialize(serializer)
     }
 
@@ -139,7 +143,7 @@ impl TrieRef {
 }
 
 impl Serialize for TrieRef {
-    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+    fn serialize(&self, serializer: Serializer) -> Serializer {
         self.0.serialize(serializer)
     }
 
@@ -185,7 +189,7 @@ impl TrieHash {
 }
 
 impl Serialize for TrieHash {
-    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+    fn serialize(&self, serializer: Serializer) -> Serializer {
         self.0.serialize(serializer)
     }
 
@@ -262,7 +266,7 @@ pub enum Do<C: TrieContent> {
     Ref(TrieRef, Option<TrieId>),
     Move {
         id: TrieId,
-        to: Option<(TrieId, TrieKey, C)>,
+        to: Option<(TrieId, TrieKey, Option<C>)>,
     },
 }
 
@@ -271,7 +275,7 @@ pub enum Undo<C: TrieContent> {
     Ref(TrieRef, Option<TrieId>),
     Move {
         id: TrieId,
-        to: Option<(TrieId, TrieKey, C)>,
+        to: Option<(TrieId, TrieKey, Option<C>)>,
     },
 }
 
@@ -333,9 +337,9 @@ impl<C: TrieContent> Deserialize for Undo<C> {
     fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
         match bytes[0] {
             b'r' => {
-                let (r, bytes) = TrieRef::deserialize(&bytes[1..])?;
+                let (r, bytes) = <_>::deserialize(&bytes[1..])?;
                 let (id, bytes) = if bytes[0] == b'i' {
-                    let (id, bytes) = TrieId::deserialize(&bytes[1..])?;
+                    let (id, bytes) = <_>::deserialize(&bytes[1..])?;
                     (Some(id), bytes)
                 } else {
                     (None, &bytes[1..])
@@ -343,11 +347,11 @@ impl<C: TrieContent> Deserialize for Undo<C> {
                 Ok((Undo::Ref(r, id), bytes))
             }
             b'm' => {
-                let (id, bytes) = TrieId::deserialize(&bytes[1..])?;
+                let (id, bytes) = <_>::deserialize(&bytes[1..])?;
                 let (to, bytes) = if bytes[0] == b'i' {
-                    let (to_id, bytes) = TrieId::deserialize(&bytes[1..])?;
-                    let (to_key, bytes) = TrieKey::deserialize(bytes)?;
-                    let (to_c, bytes) = C::deserialize(bytes)?;
+                    let (to_id, bytes) = <_>::deserialize(&bytes[1..])?;
+                    let (to_key, bytes) = <_>::deserialize(bytes)?;
+                    let (to_c, bytes) = <_>::deserialize(bytes)?;
                     (Some((to_id, to_key, to_c)), bytes)
                 } else {
                     (None, &bytes[1..])
@@ -365,7 +369,7 @@ pub struct Op<M: TrieMarker, C: TrieContent> {
     pub parent_ref: TrieRef,
     pub child_key: TrieKey,
     pub child_ref: TrieRef,
-    pub child_content: C,
+    pub child_content: Option<C>,
 }
 
 impl<M: TrieMarker, C: TrieContent> Serialize for Op<M, C> {
@@ -391,11 +395,11 @@ impl<M: TrieMarker, C: TrieContent> Serialize for Op<M, C> {
 
 impl<M: TrieMarker, C: TrieContent> Deserialize for Op<M, C> {
     fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
-        let (marker, bytes) = M::deserialize(bytes)?;
-        let (parent_ref, bytes) = TrieRef::deserialize(bytes)?;
-        let (child_key, bytes) = TrieKey::deserialize(bytes)?;
-        let (child_ref, bytes) = TrieRef::deserialize(bytes)?;
-        let (child_content, bytes) = C::deserialize(bytes)?;
+        let (marker, bytes) = <_>::deserialize(bytes)?;
+        let (parent_ref, bytes) = <_>::deserialize(bytes)?;
+        let (child_key, bytes) = <_>::deserialize(bytes)?;
+        let (child_ref, bytes) = <_>::deserialize(bytes)?;
+        let (child_content, bytes) = <_>::deserialize(bytes)?;
 
         Ok((
             Self {
@@ -496,9 +500,9 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DB> Trie<M, C, DBImpl> {
         }
     }
 
-    pub fn write(&mut self) -> Result<TrieUpdater<M, C, DBImpl::Transaction<'_>>> {
-        Ok(TrieUpdater {
-            writer: self.store.write()?,
+    pub fn write(&mut self) -> Result<TrieTransaction<M, C, DBImpl::Transaction<'_>>> {
+        Ok(TrieTransaction {
+            transaction: self.store.write()?,
         })
     }
 
@@ -510,7 +514,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DB> Trie<M, C, DBImpl> {
     ) {
         let node = self.store.get_ensure(root).unwrap();
         let children = self.store.get_children(root).unwrap();
-        let path = format!("{}/{}", prefix, node.borrow().key);
+        let path = format!("{}/{}", prefix, node.key);
         base.push((path.clone(), root, node.borrow().clone()));
 
         for child in children {
@@ -528,36 +532,36 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DB> std::ops::Deref for Trie<M, C, D
     }
 }
 
-pub struct TrieUpdater<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> {
-    writer: TrieStoreWriter<DBImpl, M, C>,
+pub struct TrieTransaction<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> {
+    transaction: TrieStoreTransaction<DBImpl, M, C>,
 }
 
-impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdater<M, C, DBImpl> {
-    pub fn from_db(db: DBImpl) -> Self {
-        TrieUpdater {
-            writer: TrieStoreWriter::from_db(db),
-        }
+impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieTransaction<M, C, DBImpl> {
+    pub fn from_db(db: DBImpl) -> Result<Self> {
+        Ok(TrieTransaction {
+            transaction: TrieStoreTransaction::from_db(db)?,
+        })
     }
 
     fn move_node(
         &mut self,
         id: TrieId,
-        to: Option<(TrieId, TrieKey, C)>,
-    ) -> Result<Option<(TrieId, TrieKey, C)>> {
-        let old = self.writer.set_tree_node(id, to)?;
+        to: Option<(TrieId, TrieKey, Option<C>)>,
+    ) -> Result<Option<(TrieId, TrieKey, Option<C>)>> {
+        let old = self.transaction.set_tree_node(id, to)?;
         Ok(old)
     }
 
     fn do_op(&mut self, op: Op<M, C>) -> Result<LogOp<M, C>> {
         let mut dos: Vec<Do<C>> = Vec::with_capacity(3);
-        let child_id = if let Some(child_id) = self.writer.get_id(op.child_ref.to_owned())? {
+        let child_id = if let Some(child_id) = self.transaction.get_id(op.child_ref.to_owned())? {
             child_id.to_owned()
         } else {
-            let new_id = self.writer.create_id()?;
+            let new_id = self.transaction.create_id()?;
             dos.push(Do::Ref(op.child_ref.to_owned(), Some(new_id)));
             new_id
         };
-        let parent_id = if let Some(parent_id) = self.writer.get_id(op.parent_ref.to_owned())? {
+        let parent_id = if let Some(parent_id) = self.transaction.get_id(op.parent_ref.to_owned())? {
             parent_id.to_owned()
         } else {
             return Err(Error::TreeBroken(format!(
@@ -568,15 +572,14 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdat
 
         // ensures no cycles are introduced.
         'c: {
-            if child_id != parent_id && !self.writer.is_ancestor(parent_id, child_id)? {
+            if child_id != parent_id && !self.transaction.is_ancestor(parent_id, child_id)? {
                 if let Some(conflict_node_id) =
-                    self.writer.get_child(parent_id, op.child_key.to_owned())?
+                    self.transaction.get_child(parent_id, op.child_key.to_owned())?
                 {
                     if conflict_node_id != child_id {
-                        let conflict_node = self.writer.get_ensure(conflict_node_id)?;
                         let conflict_is_empty =
-                            self.writer.get_children(conflict_node_id)?.next().is_none();
-                        let new_is_empty = self.writer.get_children(child_id)?.next().is_none();
+                            self.transaction.get_children(conflict_node_id)?.next().is_none();
+                        let new_is_empty = self.transaction.get_children(child_id)?.next().is_none();
                         if !conflict_is_empty && new_is_empty {
                             // new is empty, keep before
                             dos.push(Do::Ref(op.child_ref.to_owned(), Some(conflict_node_id)));
@@ -592,7 +595,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdat
                             break 'c;
                         } else {
                             // keep new
-                            if let Some(refs) = self.writer.get_refs(conflict_node_id)? {
+                            if let Some(refs) = self.transaction.get_refs(conflict_node_id)? {
                                 for r in refs {
                                     dos.push(Do::Ref(r.borrow().clone(), Some(child_id)));
                                 }
@@ -603,7 +606,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdat
                                 to: Some((
                                     CONFLICT,
                                     TrieKey(conflict_node_id.to_string()),
-                                    conflict_node.borrow().content.to_owned(),
+                                    None,
                                 )),
                             });
 
@@ -643,7 +646,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdat
     fn exec_do(&mut self, d: Do<C>) -> Result<Undo<C>> {
         Ok(match d {
             Do::Ref(r, id) => {
-                let old_id = self.writer.set_ref(r.to_owned(), id)?;
+                let old_id = self.transaction.set_ref(r.to_owned(), id)?;
                 Undo::Ref(r, old_id)
             }
             Do::Move { id, to } => {
@@ -656,7 +659,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdat
     fn exec_undo(&mut self, d: Undo<C>) -> Result<()> {
         match d {
             Undo::Ref(r, id) => {
-                self.writer.set_ref(r, id)?;
+                self.transaction.set_ref(r, id)?;
             }
             Undo::Move { id, to } => {
                 self.move_node(id, to)?;
@@ -676,7 +679,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdat
     pub fn apply(&mut self, ops: Vec<Op<M, C>>) -> Result<&mut Self> {
         let mut redo_queue = Vec::new();
         if let Some(first_op) = ops.first() {
-            while let Some(last) = self.writer.pop_log()? {
+            while let Some(last) = self.transaction.pop_log()? {
                 match first_op.marker.partial_cmp(&last.op.marker) {
                     None | Some(Ordering::Equal) => {
                         return Err(Error::InvalidOp(
@@ -687,7 +690,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdat
                         redo_queue.push(self.undo_op(last)?);
                     }
                     Some(Ordering::Greater) => {
-                        self.writer.push_log(last)?;
+                        self.transaction.push_log(last)?;
                         break;
                     }
                 }
@@ -705,18 +708,18 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdat
                         }
                         Some(Ordering::Less) => {
                             let log_op = self.do_op(op)?;
-                            self.writer.push_log(log_op)?;
+                            self.transaction.push_log(log_op)?;
                             redo_queue.push(redo);
                             break;
                         }
                         Some(Ordering::Greater) => {
                             let redo_log_op: LogOp<M, C> = self.do_op(redo)?;
-                            self.writer.push_log(redo_log_op)?;
+                            self.transaction.push_log(redo_log_op)?;
                         }
                     }
                 } else {
                     let log_op = self.do_op(op)?;
-                    self.writer.push_log(log_op)?;
+                    self.transaction.push_log(log_op)?;
                     break;
                 }
             }
@@ -724,40 +727,40 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieUpdat
 
         for redo in redo_queue.into_iter().rev() {
             let redo_log_op: LogOp<M, C> = self.do_op(redo)?;
-            self.writer.push_log(redo_log_op)?;
+            self.transaction.push_log(redo_log_op)?;
         }
 
         Ok(self)
     }
 }
 
-impl<M: TrieMarker, C: TrieContent, DBImpl: DBTransaction> TrieUpdater<M, C, DBImpl> {
+impl<M: TrieMarker, C: TrieContent, DBImpl: DBTransaction> TrieTransaction<M, C, DBImpl> {
     pub fn commit(self) -> Result<()> {
-        self.writer.commit()?;
+        self.transaction.commit()?;
         Ok(())
     }
 
     pub fn rollback(self) -> Result<()> {
-        self.writer.rollback()?;
+        self.transaction.rollback()?;
         Ok(())
     }
 }
 
 impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> std::ops::Deref
-    for TrieUpdater<M, C, DBImpl>
+    for TrieTransaction<M, C, DBImpl>
 {
-    type Target = TrieStoreWriter<DBImpl, M, C>;
+    type Target = TrieStoreTransaction<DBImpl, M, C>;
 
     fn deref(&self) -> &Self::Target {
-        &self.writer
+        &self.transaction
     }
 }
 
 impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> std::ops::DerefMut
-    for TrieUpdater<M, C, DBImpl>
+    for TrieTransaction<M, C, DBImpl>
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.writer
+        &mut self.transaction
     }
 }
 

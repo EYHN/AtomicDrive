@@ -1,11 +1,11 @@
 use std::{borrow::Borrow, marker::PhantomData};
 
-use db::{backend::rocks::RocksDB, DBLock, DBRead, DBTransaction, DBWrite, DB};
+use db::{DBLock, DBRead, DBTransaction, DBWrite, DB};
 use utils::{Deserialize, PathTools, Serialize, Serializer};
 
 use super::{
     Error, LogOp, Result, TrieContent, TrieId, TrieKey, TrieMarker, TrieNode, TrieRef, CONFLICT,
-    ROOT,
+    CONFLICT_REF, RECYCLE, RECYCLE_REF, ROOT, ROOT_REF,
 };
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -19,6 +19,7 @@ enum Keys {
     LogTotalLength,
     Log(u64),
     Logs,
+    GlobalLock,
 }
 
 impl Serialize for Keys {
@@ -42,6 +43,7 @@ impl Serialize for Keys {
             Keys::LogTotalLength => {}
             Keys::Log(index) => serializer = index.serialize(serializer),
             Keys::Logs => {}
+            Keys::GlobalLock => {}
         }
 
         serializer
@@ -60,6 +62,7 @@ impl Serialize for Keys {
                     Keys::LogTotalLength => 0,
                     Keys::Log(index) => index.byte_size()?,
                     Keys::Logs => 0,
+                    Keys::GlobalLock => 0,
                 }
             },
         )
@@ -117,6 +120,7 @@ impl Keys {
             Keys::LogTotalLength => b"log_total_length",
             Keys::Log(_) => b"l",
             Keys::Logs => b"l",
+            Keys::GlobalLock => b"global_lock",
         }
     }
 
@@ -169,6 +173,10 @@ mod keys_tests {
             Keys::from_bytes(&Keys::Log(111).to_bytes()).unwrap(),
             Keys::Log(111)
         );
+        assert_eq!(
+            Keys::from_bytes(&Keys::GlobalLock.to_bytes()).unwrap(),
+            Keys::GlobalLock
+        );
     }
 }
 
@@ -181,6 +189,7 @@ enum Values<M: TrieMarker, C: TrieContent> {
     AutoIncrementId(TrieId),
     LogTotalLength(u64),
     Log(LogOp<M, C>),
+    GlobalLock(bool),
 }
 
 impl<M: TrieMarker, C: TrieContent> Values<M, C> {
@@ -193,6 +202,7 @@ impl<M: TrieMarker, C: TrieContent> Values<M, C> {
             Values::AutoIncrementId(_) => "AutoIncrementId",
             Values::LogTotalLength(_) => "LogTotalLength",
             Values::Log(_) => "Log",
+            Values::GlobalLock(_) => "GlobalLock",
         }
     }
     fn to_bytes(&self) -> impl AsRef<[u8]> {
@@ -204,6 +214,7 @@ impl<M: TrieMarker, C: TrieContent> Values<M, C> {
             Values::AutoIncrementId(id) => id.to_bytes(),
             Values::LogTotalLength(id) => id.to_bytes(),
             Values::Log(log) => log.to_bytes(),
+            Values::GlobalLock(lock) => lock.to_bytes(),
         }
     }
 
@@ -250,6 +261,11 @@ impl<M: TrieMarker, C: TrieContent> Values<M, C> {
             Keys::Logs => {
                 panic!("Keys::Logs not have value format")
             }
+            Keys::GlobalLock => Self::GlobalLock(
+                Deserialize::deserialize(bytes)
+                    .map_err(Error::DecodeError)?
+                    .0,
+            ),
         })
     }
 
@@ -405,7 +421,7 @@ mod values_tests {
         let test_log = LogOp {
             op: Op {
                 marker: 122,
-                child_content: 555,
+                child_content: Some(555),
                 child_key: TrieKey("CCC".to_string()),
                 child_ref: TrieRef::from(987),
                 parent_ref: TrieRef::from(597),
@@ -413,7 +429,7 @@ mod values_tests {
             undos: Vec::from([
                 Undo::Move {
                     id: TrieId::from(444),
-                    to: Some((TrieId::from(398), TrieKey("eee".to_string()), 494)),
+                    to: Some((TrieId::from(398), TrieKey("eee".to_string()), Some(494))),
                 },
                 Undo::Ref(TrieRef::from(375), Some(TrieId::from(222))),
                 Undo::Ref(TrieRef::from(664), None),
@@ -432,6 +448,15 @@ mod values_tests {
             .unwrap(),
             TestValue::Log(test_log)
         );
+
+        assert_eq!(
+            TestValue::parse(
+                &Keys::GlobalLock,
+                TestValue::GlobalLock(true).to_bytes().as_ref()
+            )
+            .unwrap(),
+            TestValue::GlobalLock(true)
+        );
     }
 }
 
@@ -440,16 +465,6 @@ pub struct TrieStore<DBImpl: DB, M: TrieMarker, C: TrieContent> {
     db: DBImpl,
     m: PhantomData<M>,
     c: PhantomData<C>,
-}
-
-impl<M: TrieMarker, C: TrieContent> TrieStore<RocksDB, M, C> {
-    pub fn open_or_create_rocks_db() -> Result<Self> {
-        // let mut opts = rocksdb::Options::default();
-        // opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(11));
-        // opts.create_if_missing(true);
-
-        todo!()
-    }
 }
 
 impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
@@ -486,11 +501,27 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
                 content: Default::default(),
             }),
         )?;
-        writer.db_set(Keys::RefIdIndex(TrieRef::from(0)), Values::RefIdIndex(ROOT))?;
         writer.db_set(
-            Keys::IdRefsIndex(ROOT),
-            Values::IdRefsIndex(vec![TrieRef::from(0)]),
+            Keys::NodeInfo(RECYCLE),
+            Values::NodeInfo(TrieNode {
+                parent: RECYCLE,
+                key: TrieKey(Default::default()),
+                content: Default::default(),
+            }),
         )?;
+        writer.db_set(Keys::RefIdIndex(ROOT_REF), Values::RefIdIndex(ROOT))?;
+        writer.db_set(Keys::IdRefsIndex(ROOT), Values::IdRefsIndex(vec![ROOT_REF]))?;
+        writer.db_set(Keys::RefIdIndex(CONFLICT_REF), Values::RefIdIndex(CONFLICT))?;
+        writer.db_set(
+            Keys::IdRefsIndex(CONFLICT),
+            Values::IdRefsIndex(vec![CONFLICT_REF]),
+        )?;
+        writer.db_set(Keys::RefIdIndex(RECYCLE_REF), Values::RefIdIndex(RECYCLE))?;
+        writer.db_set(
+            Keys::IdRefsIndex(RECYCLE),
+            Values::IdRefsIndex(vec![RECYCLE_REF]),
+        )?;
+        writer.db_set(Keys::GlobalLock, Values::GlobalLock(true))?;
 
         writer.commit()?;
 
@@ -511,16 +542,25 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
             .transpose()
     }
 
-    pub fn get_refs(
-        &self,
-        id: TrieId,
-    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
+    pub fn get_id_ensure(&self, r: TrieRef) -> Result<TrieId> {
+        self.db_get(Keys::RefIdIndex(r))?
+            .ok_or(Error::TreeBroken("ref not found".to_string()))
+            .and_then(|v| v.ref_id_index())
+    }
+
+    pub fn get_refs(&self, id: TrieId) -> Result<Option<impl Iterator<Item = TrieRef>>> {
         self.db_get(Keys::IdRefsIndex(id))?
             .map(|v| v.id_refs_index().map(|v| v.into_iter()))
             .transpose()
     }
 
-    pub fn get(&self, id: TrieId) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
+    pub fn get_first_ref_ensure(&self, id: TrieId) -> Result<TrieRef> {
+        self.get_refs(id)?
+            .and_then(|mut refs| refs.next())
+            .ok_or(Error::TreeBroken("ref not found".to_string()))
+    }
+
+    pub fn get(&self, id: TrieId) -> Result<Option<TrieNode<C>>> {
         self.db_get(Keys::NodeInfo(id))?
             .map(|v| v.node_info())
             .transpose()
@@ -529,8 +569,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     pub fn get_children(
         &self,
         id: TrieId,
-    ) -> Result<impl Iterator<Item = Result<(impl Borrow<TrieKey> + '_, impl Borrow<TrieId> + '_)>>>
-    {
+    ) -> Result<impl Iterator<Item = Result<(TrieKey, TrieId)>> + '_> {
         let prefix = Keys::NodeChildren(id).to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
@@ -553,7 +592,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
             .transpose()
     }
 
-    pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<impl Borrow<LogOp<M, C>> + '_>>> {
+    pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<LogOp<M, C>>> + '_> {
         let prefix = Keys::Logs.to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
@@ -569,7 +608,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
         }))
     }
 
-    pub fn get_ensure(&self, id: TrieId) -> Result<impl Borrow<TrieNode<C>> + '_> {
+    pub fn get_ensure(&self, id: TrieId) -> Result<TrieNode<C>> {
         self.get(id)?
             .ok_or_else(|| Error::TreeBroken(format!("Trie id {id} not found")))
     }
@@ -577,10 +616,10 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     pub fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
         let mut target_id = child_id;
         while let Some(node) = self.get(target_id)? {
-            if node.borrow().parent == ancestor_id {
+            if node.parent == ancestor_id {
                 return Ok(true);
             }
-            target_id = node.borrow().parent;
+            target_id = node.parent;
             if target_id.id() < 10 {
                 break;
             }
@@ -606,7 +645,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     pub fn get_refs_by_path(
         &self,
         path: &str,
-    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
+    ) -> Result<Option<impl Iterator<Item = TrieRef> + '_>> {
         self.get_id_by_path(path).and_then(|id| {
             if let Some(id) = id {
                 self.get_refs(id)
@@ -626,12 +665,12 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
         })
     }
 
-    pub fn write(&'_ mut self) -> Result<TrieStoreWriter<DBImpl::Transaction<'_>, M, C>> {
-        Ok(TrieStoreWriter::from_db(self.db.start_transaction()?))
+    pub fn write(&'_ mut self) -> Result<TrieStoreTransaction<DBImpl::Transaction<'_>, M, C>> {
+        TrieStoreTransaction::from_db(self.db.start_transaction()?)
     }
 }
 
-pub struct TrieStoreWriter<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent> {
+pub struct TrieStoreTransaction<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent> {
     transaction: DBImpl,
     cache_log_total_len: Option<u64>,
     cache_inc_id: Option<TrieId>,
@@ -640,20 +679,32 @@ pub struct TrieStoreWriter<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: 
 }
 
 impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
-    TrieStoreWriter<DBImpl, M, C>
+    TrieStoreTransaction<DBImpl, M, C>
 {
-    pub fn from_db(db: DBImpl) -> Self {
-        Self {
+    pub fn from_db(db: DBImpl) -> Result<Self> {
+        let writer = Self {
             transaction: db,
             cache_log_total_len: None,
             cache_inc_id: None,
             m: Default::default(),
             c: Default::default(),
+        };
+
+        writer.db_get_for_update(Keys::GlobalLock)?;
+
+        Ok(writer)
+    }
+
+    fn db_get_for_update(&self, key: Keys) -> Result<Option<Values<M, C>>> {
+        if let Some(value) = self.transaction.get_for_update(key.to_bytes())? {
+            Ok(Some(Values::parse(&key, value.as_ref())?))
+        } else {
+            Ok(None)
         }
     }
 
     fn db_get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
-        if let Some(value) = self.transaction.get_for_update(key.to_bytes())? {
+        if let Some(value) = self.transaction.get(key.to_bytes())? {
             Ok(Some(Values::parse(&key, value.as_ref())?))
         } else {
             Ok(None)
@@ -692,16 +743,25 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
             .transpose()
     }
 
-    pub fn get_refs(
-        &self,
-        id: TrieId,
-    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
+    pub fn get_id_ensure(&self, r: TrieRef) -> Result<TrieId> {
+        self.db_get(Keys::RefIdIndex(r))?
+            .ok_or(Error::TreeBroken("ref not found".to_string()))
+            .and_then(|v| v.ref_id_index())
+    }
+
+    pub fn get_refs(&self, id: TrieId) -> Result<Option<impl Iterator<Item = TrieRef>>> {
         self.db_get(Keys::IdRefsIndex(id))?
             .map(|v| v.id_refs_index().map(|v| v.into_iter()))
             .transpose()
     }
 
-    pub fn get(&self, id: TrieId) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
+    pub fn get_first_ref_ensure(&self, id: TrieId) -> Result<TrieRef> {
+        self.get_refs(id)?
+            .and_then(|mut refs| refs.next())
+            .ok_or(Error::TreeBroken("ref not found".to_string()))
+    }
+
+    pub fn get(&self, id: TrieId) -> Result<Option<TrieNode<C>>> {
         self.db_get(Keys::NodeInfo(id))?
             .map(|v| v.node_info())
             .transpose()
@@ -710,8 +770,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
     pub fn get_children(
         &self,
         id: TrieId,
-    ) -> Result<impl Iterator<Item = Result<(impl Borrow<TrieKey> + '_, impl Borrow<TrieId> + '_)>>>
-    {
+    ) -> Result<impl Iterator<Item = Result<(TrieKey, TrieId)>> + '_> {
         let prefix = Keys::NodeChildren(id).to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
@@ -734,7 +793,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
             .transpose()
     }
 
-    pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<impl Borrow<LogOp<M, C>> + '_>>> {
+    pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<LogOp<M, C>>> + '_> {
         let prefix = Keys::Logs.to_bytes();
         let mut upper_bound = prefix.clone();
         *upper_bound.last_mut().unwrap() += 1;
@@ -750,7 +809,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
         }))
     }
 
-    pub fn get_ensure(&self, id: TrieId) -> Result<impl Borrow<TrieNode<C>> + '_> {
+    pub fn get_ensure(&self, id: TrieId) -> Result<TrieNode<C>> {
         self.get(id)?
             .ok_or_else(|| Error::TreeBroken(format!("Trie id {id} not found")))
     }
@@ -758,10 +817,10 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
     pub fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
         let mut target_id = child_id;
         while let Some(node) = self.get(target_id)? {
-            if node.borrow().parent == ancestor_id {
+            if node.parent == ancestor_id {
                 return Ok(true);
             }
-            target_id = node.borrow().parent;
+            target_id = node.parent;
             if target_id.id() < 10 {
                 break;
             }
@@ -784,10 +843,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
         Ok(Some(id))
     }
 
-    pub fn get_refs_by_path(
-        &self,
-        path: &str,
-    ) -> Result<Option<impl Iterator<Item = impl Borrow<TrieRef> + '_>>> {
+    pub fn get_refs_by_path(&self, path: &str) -> Result<Option<impl Iterator<Item = TrieRef>>> {
         self.get_id_by_path(path).and_then(|id| {
             if let Some(id) = id {
                 self.get_refs(id)
@@ -797,7 +853,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
         })
     }
 
-    pub fn get_by_path(&self, path: &str) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
+    pub fn get_by_path(&self, path: &str) -> Result<Option<TrieNode<C>>> {
         self.get_id_by_path(path).and_then(|id| {
             if let Some(id) = id {
                 self.get(id)
@@ -872,8 +928,8 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
     pub fn set_tree_node(
         &mut self,
         id: TrieId,
-        to: Option<(TrieId, TrieKey, C)>,
-    ) -> Result<Option<(TrieId, TrieKey, C)>> {
+        to: Option<(TrieId, TrieKey, Option<C>)>,
+    ) -> Result<Option<(TrieId, TrieKey, Option<C>)>> {
         let node = self
             .db_get(Keys::NodeInfo(id))?
             .map(|v| v.node_info())
@@ -890,17 +946,34 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
                 Values::NodeChild(id),
             )?;
 
+            let not_update_content = to.2.is_none();
+
             self.db_set(
                 Keys::NodeInfo(id),
                 Values::NodeInfo(TrieNode {
                     parent: to.0,
                     key: to.1,
-                    content: to.2,
+                    content: to
+                        .2
+                        .or(node.as_ref().map(|n| n.content.clone()))
+                        .unwrap_or(Default::default()),
                 }),
             )?;
-        }
 
-        Ok(node.map(|n| (n.parent, n.key, n.content)))
+            Ok(node.map(|n| {
+                (
+                    n.parent,
+                    n.key,
+                    if not_update_content {
+                        None
+                    } else {
+                        Some(n.content)
+                    },
+                )
+            }))
+        } else {
+            Ok(node.map(|n| (n.parent, n.key, Some(n.content))))
+        }
     }
 
     pub fn pop_log(&mut self) -> Result<Option<LogOp<M, C>>> {
@@ -932,7 +1005,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
     }
 }
 
-impl<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> TrieStoreWriter<DBImpl, M, C> {
+impl<DBImpl: DBTransaction, M: TrieMarker, C: TrieContent> TrieStoreTransaction<DBImpl, M, C> {
     pub fn commit(self) -> Result<()> {
         self.transaction.commit()?;
         Ok(())

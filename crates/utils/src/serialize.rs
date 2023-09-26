@@ -178,6 +178,30 @@ impl Deserialize for u64 {
     }
 }
 
+impl Serialize for u128 {
+    fn serialize(&self, mut bytes: Serializer) -> Serializer {
+        bytes.extend_from_slice(&self.to_be_bytes());
+        bytes
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(size_of::<u128>())
+    }
+}
+
+impl Deserialize for u128 {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        Ok((
+            Self::from_be_bytes(
+                bytes[0..8]
+                    .try_into()
+                    .map_err(|_| format!("Failed to decode u128: {bytes:?}"))?,
+            ),
+            &bytes[8..],
+        ))
+    }
+}
+
 impl<T: Serialize, const N: usize> Serialize for [T; N] {
     fn serialize(&self, mut bytes: Serializer) -> Serializer {
         for elem in self {
@@ -223,6 +247,37 @@ impl<A: Deserialize, B: Deserialize> Deserialize for (A, B) {
         let (a, rest) = A::deserialize(bytes)?;
         let (b, rest) = B::deserialize(rest)?;
         Ok(((a, b), rest))
+    }
+}
+
+impl<T: Serialize> Serialize for Option<T> {
+    fn serialize(&self, mut bytes: Serializer) -> Serializer {
+        match self {
+            Some(elem) => {
+                bytes.push(1);
+                bytes = elem.serialize(bytes);
+            }
+            None => bytes.push(0),
+        }
+        bytes
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(match self {
+            Some(elem) => 1 + elem.byte_size()?,
+            None => 1,
+        })
+    }
+}
+
+impl<T: Deserialize> Deserialize for Option<T> {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        if bytes[0] == 0 {
+            Ok((None, &bytes[1..]))
+        } else {
+            let (elem, bytes) = T::deserialize(&bytes[1..])?;
+            Ok((Some(elem), bytes))
+        }
     }
 }
 
@@ -298,5 +353,22 @@ impl<K: Deserialize + std::cmp::Ord, V: Deserialize> Deserialize
         }
 
         Ok((arr, rest))
+    }
+}
+
+impl Serialize for bool {
+    fn serialize(&self, mut bytes: Serializer) -> Serializer {
+        bytes.push(if self == &true { 1u8 } else { 0u8 });
+        bytes
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(1)
+    }
+}
+
+impl Deserialize for bool {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        Ok((bytes[0] != 0, &bytes[1..]))
     }
 }

@@ -36,7 +36,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             })
         });
         group.bench_function("MemoryDB", |b| {
-            let db = MemoryDB::default();
+            let mut db = MemoryDB::default();
             let mut i = 0;
             b.iter(|| {
                 let mut writer = db.start_transaction().unwrap();
@@ -50,7 +50,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         group.bench_function("MemoryDB with bump alloc", |b| {
             let bump = Bump::new();
 
-            let db = MemoryDB::new_in(&bump);
+            let mut db = MemoryDB::new_in(&bump);
             let mut i = 0;
             b.iter(|| {
                 let mut writer = db.start_transaction().unwrap();
@@ -62,7 +62,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             })
         });
         group.bench_function("MemoryDB with prefix", |b| {
-            let db = MemoryDB::default().prefix("iii");
+            let mut db = MemoryDB::default().prefix("iii");
             let mut i = 0;
             b.iter(|| {
                 let mut writer = db.start_transaction().unwrap();
@@ -117,7 +117,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             })
         });
         group.bench_function("MemoryDB", |b| {
-            let db = MemoryDB::default();
+            let mut db = MemoryDB::default();
             let mut writer = db.start_transaction().unwrap();
             for i in 0..10000 {
                 writer
@@ -131,7 +131,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             })
         });
         group.bench_function("MemoryDB with prefix", |b| {
-            let db = MemoryDB::default().prefix("iii");
+            let mut db = MemoryDB::default().prefix("iii");
             let mut writer = db.start_transaction().unwrap();
             for i in 0..10000 {
                 writer

@@ -120,13 +120,6 @@ impl End {
 
     pub fn rename(&mut self, from: &str, to: &str) {
         let mut writer = self.trie.write().unwrap();
-        let content = writer
-            .get_by_path(from)
-            .unwrap()
-            .unwrap()
-            .borrow()
-            .content
-            .clone();
         let from = writer
             .get_refs_by_path(from)
             .unwrap()
@@ -157,7 +150,7 @@ impl End {
                 parent_ref: to,
                 child_key: TrieKey(filename),
                 child_ref: from,
-                child_content: content,
+                child_content: None,
             }])
             .unwrap();
         writer.commit().unwrap();
@@ -187,7 +180,7 @@ impl End {
                 parent_ref: to,
                 child_key: TrieKey(filename),
                 child_ref: TrieRef::new(),
-                child_content: data.to_owned(),
+                child_content: Some(data.to_owned()),
             }])
             .unwrap();
         writer.commit().unwrap();

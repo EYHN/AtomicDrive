@@ -192,7 +192,11 @@ pub trait DBTransaction: DBWrite + DBRead + DBLock {
         Prefix::new(self, prefix)
     }
 
-    fn prefix_in<A: Allocator + Clone>(self, prefix: impl AsRef<[u8]>, alloc: A) -> Prefix<Self, A>
+    fn prefix_in<A: Allocator + Clone>(
+        self,
+        prefix: impl AsRef<[u8]>,
+        alloc: A,
+    ) -> Prefix<Self, A>
     where
         Self: std::marker::Sized,
     {

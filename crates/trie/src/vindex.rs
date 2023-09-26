@@ -1,6 +1,6 @@
 use std::{borrow::Borrow, collections::VecDeque, fmt::Debug};
 
-use crate::trie::{Error as TrieError, Op as TrieOp, Trie, TrieRef, TrieUpdater};
+use crate::trie::{Error as TrieError, Op as TrieOp, Trie, TrieRef, TrieTransaction};
 use chunk::HashChunks;
 use crdts::{CvRDT, VClock};
 use db::{
@@ -272,8 +272,11 @@ impl<DBImpl: DBTransaction> VIndexTransaction<DBImpl> {
         Ok(())
     }
 
-    fn trie(&mut self) -> TrieUpdater<Marker, Entity, db::prefix::Prefix<&'_ mut DBImpl>> {
-        TrieUpdater::from_db(Prefix::new(&mut self.db, DB_TRIE_PREFIX))
+    fn trie(&mut self) -> Result<TrieTransaction<Marker, Entity, db::prefix::Prefix<&'_ mut DBImpl>>> {
+        Ok(TrieTransaction::from_db(Prefix::new(
+            &mut self.db,
+            DB_TRIE_PREFIX,
+        ))?)
     }
 
     fn apply(&mut self, ops: Vec<Op>) -> Result<()> {
@@ -282,7 +285,7 @@ impl<DBImpl: DBTransaction> VIndexTransaction<DBImpl> {
             clock.merge(op.marker.clock.clone())
         }
         self.update_clock(clock)?;
-        self.trie().apply(ops)?;
+        self.trie()?.apply(ops)?;
 
         Ok(())
     }
