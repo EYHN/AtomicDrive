@@ -272,11 +272,11 @@ impl<DBImpl: DBTransaction> VIndexTransaction<DBImpl> {
         Ok(())
     }
 
-    fn trie(&mut self) -> Result<TrieTransaction<Marker, Entity, db::prefix::Prefix<&'_ mut DBImpl>>> {
-        Ok(TrieTransaction::from_db(Prefix::new(
+    fn trie(&mut self) -> TrieTransaction<Marker, Entity, db::prefix::Prefix<&'_ mut DBImpl>> {
+        TrieTransaction::from_db(Prefix::new(
             &mut self.db,
             DB_TRIE_PREFIX,
-        ))?)
+        ))
     }
 
     fn apply(&mut self, ops: Vec<Op>) -> Result<()> {
@@ -285,7 +285,7 @@ impl<DBImpl: DBTransaction> VIndexTransaction<DBImpl> {
             clock.merge(op.marker.clock.clone())
         }
         self.update_clock(clock)?;
-        self.trie()?.apply(ops)?;
+        self.trie().apply(ops)?;
 
         Ok(())
     }

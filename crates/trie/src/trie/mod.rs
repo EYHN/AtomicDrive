@@ -364,20 +364,82 @@ impl<C: TrieContent> Deserialize for Undo<C> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpTarget {
+    Ref(TrieRef),
+    Id(TrieId),
+    NewId,
+}
+
+impl From<TrieId> for OpTarget {
+    fn from(value: TrieId) -> Self {
+        Self::Id(value)
+    }
+}
+
+impl From<TrieRef> for OpTarget {
+    fn from(value: TrieRef) -> Self {
+        Self::Ref(value)
+    }
+}
+
+impl Serialize for OpTarget {
+    fn serialize(&self, mut serializer: Serializer) -> Serializer {
+        match self {
+            OpTarget::Ref(r) => {
+                serializer.push(b'r');
+                serializer = r.serialize(serializer);
+            }
+            OpTarget::Id(i) => {
+                serializer.push(b'i');
+                serializer = i.serialize(serializer);
+            }
+            OpTarget::NewId => serializer.push(b'n'),
+        }
+
+        serializer
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(match self {
+            OpTarget::Ref(r) => 1 + r.byte_size()?,
+            OpTarget::Id(i) => 1 + i.byte_size()?,
+            OpTarget::NewId => 1,
+        })
+    }
+}
+
+impl Deserialize for OpTarget {
+    fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
+        match bytes[0] {
+            b'r' => {
+                let (r, bytes) = <_>::deserialize(&bytes[1..])?;
+                Ok((Self::Ref(r), bytes))
+            }
+            b'i' => {
+                let (id, bytes) = <_>::deserialize(&bytes[1..])?;
+                Ok((Self::Id(id), bytes))
+            }
+            b'n' => Ok((Self::NewId, &bytes[1..])),
+            _ => Err("Failed to decode OpTarget".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Op<M: TrieMarker, C: TrieContent> {
     pub marker: M,
-    pub parent_ref: TrieRef,
+    pub parent_target: OpTarget,
     pub child_key: TrieKey,
-    pub child_ref: TrieRef,
+    pub child_target: OpTarget,
     pub child_content: Option<C>,
 }
 
 impl<M: TrieMarker, C: TrieContent> Serialize for Op<M, C> {
     fn serialize(&self, mut serializer: Serializer) -> Serializer {
         serializer = self.marker.serialize(serializer);
-        serializer = self.parent_ref.serialize(serializer);
+        serializer = self.parent_target.serialize(serializer);
         serializer = self.child_key.serialize(serializer);
-        serializer = self.child_ref.serialize(serializer);
+        serializer = self.child_target.serialize(serializer);
         serializer = self.child_content.serialize(serializer);
         serializer
     }
@@ -385,9 +447,9 @@ impl<M: TrieMarker, C: TrieContent> Serialize for Op<M, C> {
     fn byte_size(&self) -> Option<usize> {
         Some(
             self.marker.byte_size()?
-                + self.parent_ref.byte_size()?
+                + self.parent_target.byte_size()?
                 + self.child_key.byte_size()?
-                + self.child_ref.byte_size()?
+                + self.child_target.byte_size()?
                 + self.child_content.byte_size()?,
         )
     }
@@ -396,17 +458,17 @@ impl<M: TrieMarker, C: TrieContent> Serialize for Op<M, C> {
 impl<M: TrieMarker, C: TrieContent> Deserialize for Op<M, C> {
     fn deserialize(bytes: &[u8]) -> std::result::Result<(Self, &[u8]), String> {
         let (marker, bytes) = <_>::deserialize(bytes)?;
-        let (parent_ref, bytes) = <_>::deserialize(bytes)?;
+        let (parent_target, bytes) = <_>::deserialize(bytes)?;
         let (child_key, bytes) = <_>::deserialize(bytes)?;
-        let (child_ref, bytes) = <_>::deserialize(bytes)?;
+        let (child_target, bytes) = <_>::deserialize(bytes)?;
         let (child_content, bytes) = <_>::deserialize(bytes)?;
 
         Ok((
             Self {
                 marker,
-                parent_ref,
+                parent_target,
                 child_key,
-                child_ref,
+                child_target,
                 child_content,
             },
             bytes,
@@ -536,11 +598,13 @@ pub struct TrieTransaction<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWri
     transaction: TrieStoreTransaction<DBImpl, M, C>,
 }
 
-impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieTransaction<M, C, DBImpl> {
-    pub fn from_db(db: DBImpl) -> Result<Self> {
-        Ok(TrieTransaction {
-            transaction: TrieStoreTransaction::from_db(db)?,
-        })
+impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock>
+    TrieTransaction<M, C, DBImpl>
+{
+    pub fn from_db(db: DBImpl) -> Self {
+        TrieTransaction {
+            transaction: TrieStoreTransaction::from_db(db),
+        }
     }
 
     fn move_node(
@@ -554,35 +618,58 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieTrans
 
     fn do_op(&mut self, op: Op<M, C>) -> Result<LogOp<M, C>> {
         let mut dos: Vec<Do<C>> = Vec::with_capacity(3);
-        let child_id = if let Some(child_id) = self.transaction.get_id(op.child_ref.to_owned())? {
-            child_id.to_owned()
-        } else {
-            let new_id = self.transaction.create_id()?;
-            dos.push(Do::Ref(op.child_ref.to_owned(), Some(new_id)));
-            new_id
+        let child_id = match &op.child_target {
+            OpTarget::Ref(child_ref) => {
+                if let Some(child_id) = self.transaction.get_id(child_ref.to_owned())? {
+                    child_id
+                } else {
+                    let new_id = self.transaction.create_id()?;
+                    dos.push(Do::Ref(child_ref.to_owned(), Some(new_id)));
+                    new_id
+                }
+            }
+            OpTarget::Id(id) => *id,
+            OpTarget::NewId => self.transaction.create_id()?,
         };
-        let parent_id = if let Some(parent_id) = self.transaction.get_id(op.parent_ref.to_owned())? {
-            parent_id.to_owned()
-        } else {
-            return Err(Error::TreeBroken(format!(
-                "parent ref {:?} not found",
-                &op.parent_ref
-            )));
+        let parent_id = match &op.parent_target {
+            OpTarget::Ref(parent_ref) => {
+                if let Some(parent_id) = self.transaction.get_id(parent_ref.to_owned())? {
+                    parent_id
+                } else {
+                    return Err(Error::TreeBroken(format!(
+                        "parent ref {:?} not found",
+                        &parent_ref
+                    )));
+                }
+            }
+            OpTarget::Id(id) => *id,
+            OpTarget::NewId => {
+                return Err(Error::InvalidOp(
+                    "Parent target could not be new id".to_string(),
+                ));
+            }
         };
 
         // ensures no cycles are introduced.
         'c: {
             if child_id != parent_id && !self.transaction.is_ancestor(parent_id, child_id)? {
-                if let Some(conflict_node_id) =
-                    self.transaction.get_child(parent_id, op.child_key.to_owned())?
+                if let Some(conflict_node_id) = self
+                    .transaction
+                    .get_child(parent_id, op.child_key.to_owned())?
                 {
                     if conflict_node_id != child_id {
-                        let conflict_is_empty =
-                            self.transaction.get_children(conflict_node_id)?.next().is_none();
-                        let new_is_empty = self.transaction.get_children(child_id)?.next().is_none();
+                        let conflict_is_empty = self
+                            .transaction
+                            .get_children(conflict_node_id)?
+                            .next()
+                            .is_none();
+                        let new_is_empty =
+                            self.transaction.get_children(child_id)?.next().is_none();
                         if !conflict_is_empty && new_is_empty {
                             // new is empty, keep before
-                            dos.push(Do::Ref(op.child_ref.to_owned(), Some(conflict_node_id)));
+                            if let OpTarget::Ref(ref child_ref) = op.child_target {
+                                dos.push(Do::Ref(child_ref.to_owned(), Some(conflict_node_id)));
+                            }
 
                             dos.push(Do::Move {
                                 id: child_id,
@@ -603,11 +690,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DBRead + DBWrite + DBLock> TrieTrans
 
                             dos.push(Do::Move {
                                 id: conflict_node_id,
-                                to: Some((
-                                    CONFLICT,
-                                    TrieKey(conflict_node_id.to_string()),
-                                    None,
-                                )),
+                                to: Some((CONFLICT, TrieKey(conflict_node_id.to_string()), None)),
                             });
 
                             dos.push(Do::Move {

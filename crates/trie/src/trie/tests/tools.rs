@@ -147,9 +147,9 @@ impl End {
                     clock: self.clock.clone(),
                     time: self.time,
                 },
-                parent_ref: to,
+                parent_target: to.into(),
                 child_key: TrieKey(filename),
-                child_ref: from,
+                child_target: from.into(),
                 child_content: None,
             }])
             .unwrap();
@@ -177,9 +177,9 @@ impl End {
                     clock: self.clock.clone(),
                     time: self.time,
                 },
-                parent_ref: to,
+                parent_target: to.into(),
                 child_key: TrieKey(filename),
-                child_ref: TrieRef::new(),
+                child_target: TrieRef::new().into(),
                 child_content: Some(data.to_owned()),
             }])
             .unwrap();

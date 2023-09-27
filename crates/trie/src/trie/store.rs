@@ -423,8 +423,8 @@ mod values_tests {
                 marker: 122,
                 child_content: Some(555),
                 child_key: TrieKey("CCC".to_string()),
-                child_ref: TrieRef::from(987),
-                parent_ref: TrieRef::from(597),
+                child_target: TrieRef::from(987).into(),
+                parent_target: TrieRef::from(597).into(),
             },
             undos: Vec::from([
                 Undo::Move {
@@ -554,12 +554,6 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
             .transpose()
     }
 
-    pub fn get_first_ref_ensure(&self, id: TrieId) -> Result<TrieRef> {
-        self.get_refs(id)?
-            .and_then(|mut refs| refs.next())
-            .ok_or(Error::TreeBroken("ref not found".to_string()))
-    }
-
     pub fn get(&self, id: TrieId) -> Result<Option<TrieNode<C>>> {
         self.db_get(Keys::NodeInfo(id))?
             .map(|v| v.node_info())
@@ -666,7 +660,11 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     }
 
     pub fn write(&'_ mut self) -> Result<TrieStoreTransaction<DBImpl::Transaction<'_>, M, C>> {
-        TrieStoreTransaction::from_db(self.db.start_transaction()?)
+        let transaction = TrieStoreTransaction::from_db(self.db.start_transaction()?);
+
+        transaction.lock()?;
+
+        Ok(transaction)
     }
 }
 
@@ -681,7 +679,7 @@ pub struct TrieStoreTransaction<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker
 impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
     TrieStoreTransaction<DBImpl, M, C>
 {
-    pub fn from_db(db: DBImpl) -> Result<Self> {
+    pub fn from_db(db: DBImpl) -> Self {
         let writer = Self {
             transaction: db,
             cache_log_total_len: None,
@@ -690,9 +688,13 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
             c: Default::default(),
         };
 
-        writer.db_get_for_update(Keys::GlobalLock)?;
+        writer
+    }
 
-        Ok(writer)
+    pub fn lock(&self) -> Result<()> {
+        self.db_get_for_update(Keys::GlobalLock)?;
+
+        Ok(())
     }
 
     fn db_get_for_update(&self, key: Keys) -> Result<Option<Values<M, C>>> {
@@ -755,12 +757,6 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
             .transpose()
     }
 
-    pub fn get_first_ref_ensure(&self, id: TrieId) -> Result<TrieRef> {
-        self.get_refs(id)?
-            .and_then(|mut refs| refs.next())
-            .ok_or(Error::TreeBroken("ref not found".to_string()))
-    }
-
     pub fn get(&self, id: TrieId) -> Result<Option<TrieNode<C>>> {
         self.db_get(Keys::NodeInfo(id))?
             .map(|v| v.node_info())
@@ -791,6 +787,12 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
         self.db_get(Keys::NodeChild(id, key))?
             .map(|v| v.node_child())
             .transpose()
+    }
+
+    pub fn get_child_ensure(&self, id: TrieId, key: TrieKey) -> Result<TrieId> {
+        self.db_get(Keys::NodeChild(id, key))?
+            .ok_or(Error::TreeBroken("child not found".to_string()))
+            .and_then(|v| v.node_child())
     }
 
     pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<LogOp<M, C>>> + '_> {

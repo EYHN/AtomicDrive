@@ -9,7 +9,8 @@ use db::{DBLock, DBRead, DBWrite, DB};
 use file::{FileFullPath, FileType};
 use thiserror::Error;
 use trie::trie::{
-    Error as TrieError, Op, Trie, TrieId, TrieKey, TrieTransaction, RECYCLE_REF, ROOT, TrieRef,
+    Error as TrieError, Op, OpTarget, Trie, TrieId, TrieKey, TrieRef, TrieTransaction, RECYCLE,
+    RECYCLE_REF, ROOT,
 };
 use utils::{Deserialize, Digest, Digestible, PathTools, Serialize};
 
@@ -27,7 +28,8 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// store file system level file identifier, e.g. inode in linux, file_id in windows
+/// store file system level file identifier, e.g. inode number in linux, file_id in windows
+/// https://man7.org/linux/man-pages/man7/inode.7.html
 /// https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info
 ///
 /// Sometimes reliable, sometimes not
@@ -45,11 +47,21 @@ type FileId = Vec<u8>;
 type Clock = u128;
 
 #[derive(Debug, Clone, Default)]
-struct Entity {
+pub struct Entity {
     file_id: FileId,
     marker: FileMarker,
     update_marker: FileUpdateMarker,
     is_directory: bool,
+}
+
+impl Entity {
+    fn empty_directory(file_id: FileId) -> Self {
+        Self {
+            file_id,
+            is_directory: true,
+            ..Default::default()
+        }
+    }
 }
 
 impl Serialize for Entity {
@@ -162,19 +174,22 @@ impl<DBImpl: DB> Tracker<DBImpl> {
 
 pub struct TrackerTransaction<DBImpl: DBRead + DBWrite + DBLock> {
     db: DBImpl,
+    current_ops: Vec<Op<u128, Entity>>,
 }
 
 impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
-    fn trie(
-        &mut self,
-    ) -> Result<TrieTransaction<u128, Entity, db::prefix::Prefix<&'_ mut DBImpl>>> {
-        Ok(TrieTransaction::from_db(db::prefix::Prefix::new(
-            &mut self.db,
-            DB_TRIE_PREFIX,
-        ))?)
+    fn lock(&mut self) -> Result<()> {
+        self.auto_increment_clock()?;
+        self.trie().lock();
+
+        Ok(())
     }
 
-    pub fn auto_increment_file_id(&mut self) -> Result<FileId> {
+    fn trie(&mut self) -> TrieTransaction<u128, Entity, db::prefix::Prefix<&'_ mut DBImpl>> {
+        TrieTransaction::from_db(db::prefix::Prefix::new(&mut self.db, DB_TRIE_PREFIX))
+    }
+
+    fn auto_increment_file_id(&mut self) -> Result<FileId> {
         let old_file_id = {
             let bytes = self
                 .db
@@ -196,98 +211,103 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
         Ok(new_file_id)
     }
 
-    pub fn clock(&self) -> Result<Clock> {
-        let bytes = self
-            .db
-            .get_for_update(CLOCK_KEY)?
-            .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?;
+    fn auto_increment_clock(&mut self) -> Result<Clock> {
+        let clock = {
+            let bytes = self
+                .db
+                .get_for_update(CLOCK_KEY)?
+                .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?;
+            Clock::from_bytes(bytes.as_ref()).map_err(Error::DecodeError)? + 1
+        };
 
-        Clock::from_bytes(bytes.as_ref()).map_err(Error::DecodeError)
+        self.db.set(CLOCK_KEY, &clock.to_bytes())?;
+
+        Ok(clock)
     }
 
-    pub fn update_clock(&mut self, new_clock: Clock) -> Result<()> {
-        Ok(self.db.set(CLOCK_KEY, new_clock.to_bytes())?)
+    fn move_node(&mut self, node: TrieId, to: TrieId, key: TrieKey) -> Result<()> {
+        let new_id = self.auto_increment_clock()?;
+
+        self.apply(Op {
+            marker: new_id,
+            parent_target: to.into(),
+            child_key: key,
+            child_target: node.into(),
+            child_content: None,
+        })
+    }
+
+    fn move_node_to_recycle(&mut self, node: TrieId) -> Result<()> {
+        self.move_node(node, RECYCLE, TrieKey(node.id().to_string()))
+    }
+
+    fn create_node(&mut self, to: TrieId, key: TrieKey, content: Entity) -> Result<()> {
+        let new_id = self.auto_increment_clock()?;
+        self.apply(Op {
+            marker: new_id,
+            parent_target: to.into(),
+            child_key: key,
+            child_target: OpTarget::NewId,
+            child_content: Some(content),
+        })
+    }
+
+    fn apply(&mut self, op: Op<u128, Entity>) -> Result<()> {
+        self.trie().apply(vec![op.clone()])?;
+        self.current_ops.push(op);
+        Ok(())
     }
 
     pub fn index(&mut self, input: IndexInput) -> Result<Vec<Op<u128, Entity>>> {
-        let mut clock = self.clock()?;
-        let mut trie = self.trie()?;
-
+        self.auto_increment_clock()?; // global lock
+        self.current_ops = vec![];
         if let IndexInput::Empty(full_path) = input {
-            if let Some(old_file_id) = trie.get_id_by_path(full_path.as_ref())? {
-                clock += 1;
-                let ops = vec![Op {
-                    marker: clock,
-                    parent_ref: RECYCLE_REF,
-                    child_key: TrieKey(old_file_id.id().to_string()),
-                    child_content: trie.get_ensure(old_file_id)?.content,
-                    child_ref: trie.get_first_ref_ensure(old_file_id)?,
-                }];
-                trie.apply(ops.clone())?;
-                self.update_clock(clock)?;
-                Ok(ops)
+            // delete the file in the full path
+            if let Some(old_file_id) = self.trie().get_id_by_path(full_path.as_ref())? {
+                self.move_node_to_recycle(old_file_id)?;
+                return Ok(core::mem::take(&mut self.current_ops));
             } else {
                 Ok(vec![])
             }
         } else {
-            let mut ops = vec![];
             let full_path = match &input {
                 IndexInput::File(full_path, _, _, _) => full_path,
                 IndexInput::Directory(full_path, _, _, _) => full_path,
                 IndexInput::Empty(_) => unreachable!(),
             };
 
-            let mut parent_id = ROOT;
-            for part in PathTools::parts(full_path.dirname().as_ref()) {
-                if let Some(child_id) = trie.get_child(parent_id, TrieKey(part.to_owned()))? {
-                    let child = trie.get_ensure(child_id)?;
+            // step 1: create parent directory if not exists
+            let parent_full_path = full_path.dirname();
+            let mut parent_id = ROOT; // start from root
+            for part in PathTools::parts(parent_full_path.as_ref()) {
+                if let Some(node_id) = self.trie().get_child(parent_id, TrieKey(part.to_owned()))? {
+                    // if exists, check the node is directory
+                    let child = self.trie().get_ensure(node_id)?;
                     if !child.content.is_directory {
-                        clock += 1;
-                        let delete_op = Op {
-                            marker: clock,
-                            parent_ref: RECYCLE_REF,
-                            child_key: TrieKey(child_id.id().to_string()),
-                            child_content: trie.get_ensure(child_id)?.content,
-                            child_ref: trie.get_first_ref_ensure(child_id)?,
-                        };
-                        clock += 1;
-                        let new_child_ref = TrieRef::new();
-                        let create_op = Op {
-                            marker: clock,
-                            parent_ref: trie.get_first_ref_ensure(parent_id)?,
-                            child_key: TrieKey(part.to_owned()),
-                            child_content: Entity {
-                                file_id: self.auto_increment_file_id()?,
-                                marker: Default::default(),
-                                update_marker: Default::default(),
-                                is_directory: true
-                            },
-                            child_ref: new_child_ref
-                        };
-                        trie.apply(vec![delete_op.clone(), create_op.clone()])?;
-                        ops.push(vec![delete_op, create_op]);
-                        parent_id = trie.get_id_ensure(new_child_ref)?;
+                        // if not directory, move the node to recycle, and create a directory
+                        self.move_node_to_recycle(node_id)?;
+                        let new_dir = Entity::empty_directory(self.auto_increment_file_id()?);
+                        self.create_node(parent_id, part.to_owned().into(), new_dir)?;
+                        parent_id = self
+                            .trie()
+                            .get_child_ensure(parent_id, TrieKey(part.to_owned()))?;
                     } else {
-                    parent_id = child_id
-                }
+                        parent_id = node_id
+                    }
                 } else {
-                    let create_op = Op {
-                        marker: clock,
-                        parent_ref: trie.get_first_ref_ensure(parent_id)?,
-                        child_key: TrieKey(part.to_owned()),
-                        child_content: Entity {
-                            file_id: self.auto_increment_file_id()?,
-                            marker: Default::default(),
-                            update_marker: Default::default(),
-                            is_directory: true
-                        },
-                        child_ref: new_child_ref
-                    };
-                    trie.apply(vec![create_op.clone()])?;
-                    ops.push(vec![create_op]);
-                    parent_id = trie.get_id_ensure(new_child_ref)?;
+                    // if not exists, create a directory
+                    let new_dir = Entity::empty_directory(self.auto_increment_file_id()?);
+                    self.create_node(parent_id, part.to_owned().into(), new_dir)?;
+                    parent_id = self
+                        .trie()
+                        .get_child_ensure(parent_id, TrieKey(part.to_owned()))?;
                 }
             }
+
+            if let IndexInput::File(full_path, file_type, file_marker, file_update_marker) = input {
+
+            }
+
 
             todo!()
         }
