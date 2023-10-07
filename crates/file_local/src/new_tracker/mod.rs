@@ -62,6 +62,15 @@ impl Entity {
             ..Default::default()
         }
     }
+
+    fn file(file_id: FileId, marker: FileMarker, update_marker: FileUpdateMarker) -> Self {
+        Self {
+            file_id,
+            marker,
+            update_marker,
+            is_directory: true,
+        }
+    }
 }
 
 impl Serialize for Entity {
@@ -187,6 +196,14 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
 
     fn trie(&mut self) -> TrieTransaction<u128, Entity, db::prefix::Prefix<&'_ mut DBImpl>> {
         TrieTransaction::from_db(db::prefix::Prefix::new(&mut self.db, DB_TRIE_PREFIX))
+    }
+
+    fn trie_id_marker_index_get() -> TrieId {
+
+    }
+
+    fn trie_id_marker_index_set() -> Result<()> {
+
     }
 
     fn auto_increment_file_id(&mut self) -> Result<FileId> {
@@ -338,6 +355,12 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                     let old_child = self.trie().get_ensure(old_child_id)?;
                     if old_child.content.is_directory {
                         self.move_node_to_recycle(old_child_id)?;
+                        let new_file = Entity::file(
+                            self.auto_increment_file_id()?,
+                            file_marker,
+                            file_update_marker,
+                        );
+                        self.create_node(parent_id, file_name.to_owned().into(), new_file)?;
                     } else {
                         // old is file
                         if old_child.content.marker != file_marker
@@ -354,6 +377,16 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                         }
                     }
                 }
+            } else if let IndexInput::Directory(
+                full_path,
+                dir_marker,
+                dir_update_marker,
+                children,
+            ) = input
+            {
+                
+            } else {
+                unreachable!()
             }
 
             todo!()
