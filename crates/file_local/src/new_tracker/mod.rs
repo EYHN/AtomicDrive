@@ -252,6 +252,30 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
         })
     }
 
+    fn update_node(
+        &mut self,
+        to: TrieId,
+        key: TrieKey,
+        id: TrieId,
+        old_content: &Entity,
+        marker: FileMarker,
+        update_marker: FileUpdateMarker,
+    ) -> Result<()> {
+        let new_id = self.auto_increment_clock()?;
+        self.apply(Op {
+            marker: new_id,
+            parent_target: to.into(),
+            child_key: key,
+            child_target: OpTarget::Id(id),
+            child_content: Some(Entity {
+                file_id: old_content.file_id.clone(),
+                is_directory: old_content.is_directory,
+                marker,
+                update_marker,
+            }),
+        })
+    }
+
     fn apply(&mut self, op: Op<u128, Entity>) -> Result<()> {
         self.trie().apply(vec![op.clone()])?;
         self.current_ops.push(op);
@@ -266,9 +290,9 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
             if let Some(old_file_id) = self.trie().get_id_by_path(full_path.as_ref())? {
                 self.move_node_to_recycle(old_file_id)?;
                 return Ok(core::mem::take(&mut self.current_ops));
-            } else {
-                Ok(vec![])
             }
+
+            Ok(vec![])
         } else {
             let full_path = match &input {
                 IndexInput::File(full_path, _, _, _) => full_path,
@@ -304,10 +328,33 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                 }
             }
 
-            if let IndexInput::File(full_path, file_type, file_marker, file_update_marker) = input {
+            if let IndexInput::File(full_path, _, file_marker, file_update_marker) = input {
+                let file_name = PathTools::basename(full_path.as_ref());
+                let old_child_id = self
+                    .trie()
+                    .get_child(parent_id, file_name.to_owned().into())?;
 
+                if let Some(old_child_id) = old_child_id {
+                    let old_child = self.trie().get_ensure(old_child_id)?;
+                    if old_child.content.is_directory {
+                        self.move_node_to_recycle(old_child_id)?;
+                    } else {
+                        // old is file
+                        if old_child.content.marker != file_marker
+                            || old_child.content.update_marker != file_update_marker
+                        {
+                            self.update_node(
+                                parent_id,
+                                file_name.to_owned().into(),
+                                old_child_id,
+                                &old_child.content,
+                                file_marker,
+                                file_update_marker,
+                            )?;
+                        }
+                    }
+                }
             }
-
 
             todo!()
         }
