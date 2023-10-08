@@ -134,6 +134,7 @@ pub enum IndexInput {
 const DB_TRIE_PREFIX: &[u8] = b"trie:";
 const CLOCK_KEY: &[u8] = b"current_clock";
 const AUTO_INCREMENT_FILE_ID_KEY: &[u8] = b"auto_increment_file_id";
+const MARKERS_PREFIX: &[u8] = b"mk:";
 
 pub struct Tracker<DBImpl: DB> {
     db: DBImpl,
@@ -198,12 +199,24 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
         TrieTransaction::from_db(db::prefix::Prefix::new(&mut self.db, DB_TRIE_PREFIX))
     }
 
-    fn trie_id_marker_index_get() -> TrieId {
-
+    fn marker_get(&self, file_marker: &FileMarker) -> Result<Option<TrieId>> {
+        let mut key = Vec::with_capacity(MARKERS_PREFIX.len() + file_marker.len());
+        key.extend_from_slice(MARKERS_PREFIX);
+        key.extend_from_slice(file_marker);
+        self.db
+            .get(key)?
+            .map(|d| TrieId::from_bytes(d.as_ref()))
+            .transpose()
+            .map_err(Error::DecodeError)
     }
 
-    fn trie_id_marker_index_set() -> Result<()> {
+    fn marker_set(&mut self, file_marker: &FileMarker, file_id: &TrieId) -> Result<()> {
+        let mut key = Vec::with_capacity(MARKERS_PREFIX.len() + file_marker.len());
+        key.extend_from_slice(MARKERS_PREFIX);
+        key.extend_from_slice(file_marker);
+        self.db.set(key, file_id.as_bytes())?;
 
+        Ok(())
     }
 
     fn auto_increment_file_id(&mut self) -> Result<FileId> {
@@ -243,10 +256,10 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
     }
 
     fn move_node(&mut self, node: TrieId, to: TrieId, key: TrieKey) -> Result<()> {
-        let new_id = self.auto_increment_clock()?;
+        let new_clock = self.auto_increment_clock()?;
 
         self.apply(Op {
-            marker: new_id,
+            marker: new_clock,
             parent_target: to.into(),
             child_key: key,
             child_target: node.into(),
@@ -258,36 +271,60 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
         self.move_node(node, RECYCLE, TrieKey(node.id().to_string()))
     }
 
-    fn create_node(&mut self, to: TrieId, key: TrieKey, content: Entity) -> Result<()> {
-        let new_id = self.auto_increment_clock()?;
+    fn create_untracked_directory(&mut self, parent: TrieId, key: TrieKey) -> Result<()> {
+        let new_clock = self.auto_increment_clock()?;
+        let directory = Entity::empty_directory(self.auto_increment_file_id()?);
         self.apply(Op {
-            marker: new_id,
-            parent_target: to.into(),
+            marker: new_clock,
+            parent_target: parent.into(),
             child_key: key,
             child_target: OpTarget::NewId,
-            child_content: Some(content),
+            child_content: Some(directory),
         })
     }
 
-    fn update_node(
+    fn create_file(
+        &mut self,
+        to: TrieId,
+        key: TrieKey,
+        marker: FileMarker,
+        update_marker: FileUpdateMarker,
+    ) -> Result<()> {
+        let new_clock = self.auto_increment_clock()?;
+        let new_id = self.trie().create_id()?;
+        let new_file = Entity {
+            file_id: self.auto_increment_file_id()?,
+            is_directory: false,
+            marker,
+            update_marker,
+        };
+        self.apply(Op {
+            marker: new_clock,
+            parent_target: to.into(),
+            child_key: key,
+            child_target: OpTarget::Id(new_id),
+            child_content: Some(new_file),
+        })
+    }
+
+    fn update_file_update_marker(
         &mut self,
         to: TrieId,
         key: TrieKey,
         id: TrieId,
         old_content: &Entity,
-        marker: FileMarker,
         update_marker: FileUpdateMarker,
     ) -> Result<()> {
-        let new_id = self.auto_increment_clock()?;
+        let new_clock = self.auto_increment_clock()?;
         self.apply(Op {
-            marker: new_id,
+            marker: new_clock,
             parent_target: to.into(),
             child_key: key,
             child_target: OpTarget::Id(id),
             child_content: Some(Entity {
                 file_id: old_content.file_id.clone(),
                 is_directory: old_content.is_directory,
-                marker,
+                marker: old_content.marker.clone(),
                 update_marker,
             }),
         })
@@ -327,8 +364,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                     if !child.content.is_directory {
                         // if not directory, move the node to recycle, and create a directory
                         self.move_node_to_recycle(node_id)?;
-                        let new_dir = Entity::empty_directory(self.auto_increment_file_id()?);
-                        self.create_node(parent_id, part.to_owned().into(), new_dir)?;
+                        self.create_untracked_directory(parent_id, part.to_owned().into())?;
                         parent_id = self
                             .trie()
                             .get_child_ensure(parent_id, TrieKey(part.to_owned()))?;
@@ -337,8 +373,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                     }
                 } else {
                     // if not exists, create a directory
-                    let new_dir = Entity::empty_directory(self.auto_increment_file_id()?);
-                    self.create_node(parent_id, part.to_owned().into(), new_dir)?;
+                    self.create_untracked_directory(parent_id, part.to_owned().into())?;
                     parent_id = self
                         .trie()
                         .get_child_ensure(parent_id, TrieKey(part.to_owned()))?;
@@ -384,7 +419,6 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                 children,
             ) = input
             {
-                
             } else {
                 unreachable!()
             }
