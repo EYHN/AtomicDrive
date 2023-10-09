@@ -310,6 +310,10 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
         })
     }
 
+    fn move_and_update_file(&mut self, to: TrieId, key: TrieKey, file: TrieId, update_marker: FileUpdateMarker) -> Result<()> {
+        
+    }
+
     fn create_directory(&mut self, to: TrieId, key: TrieKey, marker: FileMarker) -> Result<()> {
         let new_clock = self.auto_increment_clock()?;
         let new_id = self.trie().create_id()?;
@@ -414,7 +418,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                     let old_child = self.trie().get_ensure(old_child_id)?;
                     if old_child.content.is_directory {
                         self.move_node_to_recycle(old_child_id)?;
-                        if let Some(old_id) = self.marker_get(&file_marker) {
+                        if let Some(old_id) = self.marker_get(&file_marker)? {
                             
                         }
                         self.create_file(
