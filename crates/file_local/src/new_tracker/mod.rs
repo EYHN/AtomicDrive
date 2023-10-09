@@ -292,11 +292,35 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
     ) -> Result<()> {
         let new_clock = self.auto_increment_clock()?;
         let new_id = self.trie().create_id()?;
+
+        self.marker_set(&marker, &new_id)?;
+
         let new_file = Entity {
             file_id: self.auto_increment_file_id()?,
             is_directory: false,
             marker,
             update_marker,
+        };
+        self.apply(Op {
+            marker: new_clock,
+            parent_target: to.into(),
+            child_key: key,
+            child_target: OpTarget::Id(new_id),
+            child_content: Some(new_file),
+        })
+    }
+
+    fn create_directory(&mut self, to: TrieId, key: TrieKey, marker: FileMarker) -> Result<()> {
+        let new_clock = self.auto_increment_clock()?;
+        let new_id = self.trie().create_id()?;
+
+        self.marker_set(&marker, &new_id)?;
+
+        let new_file = Entity {
+            file_id: self.auto_increment_file_id()?,
+            is_directory: false,
+            marker,
+            update_marker: Default::default(),
         };
         self.apply(Op {
             marker: new_clock,
@@ -390,23 +414,31 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                     let old_child = self.trie().get_ensure(old_child_id)?;
                     if old_child.content.is_directory {
                         self.move_node_to_recycle(old_child_id)?;
-                        let new_file = Entity::file(
-                            self.auto_increment_file_id()?,
+                        if let Some(old_id) = self.marker_get(&file_marker) {
+                            
+                        }
+                        self.create_file(
+                            parent_id,
+                            file_name.to_owned().into(),
                             file_marker,
                             file_update_marker,
-                        );
-                        self.create_node(parent_id, file_name.to_owned().into(), new_file)?;
+                        )?;
                     } else {
                         // old is file
-                        if old_child.content.marker != file_marker
-                            || old_child.content.update_marker != file_update_marker
-                        {
-                            self.update_node(
+                        if old_child.content.marker != file_marker {
+                            self.move_node_to_recycle(old_child_id)?;
+                            self.create_file(
+                                parent_id,
+                                file_name.to_owned().into(),
+                                file_marker,
+                                file_update_marker,
+                            )?;
+                        } else if old_child.content.update_marker != file_update_marker {
+                            self.update_file_update_marker(
                                 parent_id,
                                 file_name.to_owned().into(),
                                 old_child_id,
                                 &old_child.content,
-                                file_marker,
                                 file_update_marker,
                             )?;
                         }
@@ -419,6 +451,17 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                 children,
             ) = input
             {
+                let file_name = PathTools::basename(full_path.as_ref());
+                let old_child_id = self
+                    .trie()
+                    .get_child(parent_id, file_name.to_owned().into())?;
+
+                if let Some(old_child_id) = old_child_id {
+                    let old_child = self.trie().get_ensure(old_child_id)?;
+                    if !old_child.content.is_directory {
+                        self.move_node_to_recycle(old_child_id)?;
+                    }
+                }
             } else {
                 unreachable!()
             }
