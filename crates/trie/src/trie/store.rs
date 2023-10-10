@@ -680,15 +680,13 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
     TrieStoreTransaction<DBImpl, M, C>
 {
     pub fn from_db(db: DBImpl) -> Self {
-        let writer = Self {
+        Self {
             transaction: db,
             cache_log_total_len: None,
             cache_inc_id: None,
             m: Default::default(),
             c: Default::default(),
-        };
-
-        writer
+        }
     }
 
     pub fn lock(&self) -> Result<()> {
@@ -729,7 +727,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
                 cache_log_total_len
             } else {
                 self.db_get(Keys::LogTotalLength)?
-                    .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?
+                    .ok_or(Error::InvalidOp("Trie Database not initialized.".to_owned()))?
                     .log_total_length()?
             },
         )
@@ -915,7 +913,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
             cache_inc_id
         } else {
             self.db_get(Keys::AutoIncrementId)?
-                .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?
+                .ok_or(Error::InvalidOp("Trie Database not initialized.".to_owned()))?
                 .auto_increment_id()?
         };
         let new_id = id.inc();

@@ -3,23 +3,23 @@
 //! The local file system not have a way to save metadata, tags, notes on files.
 //! We use an additional database to track local files and store the data associated with the files.
 
-use std::{borrow::Borrow, f32::consts::E, path::PathBuf};
+use std::{backtrace::Backtrace, fmt::Display};
 
-use db::{DBLock, DBRead, DBWrite, DB};
+use db::{DBLock, DBRead, DBTransaction, DBWrite, DB};
 use file::{FileFullPath, FileType};
 use thiserror::Error;
 use trie::trie::{
     Error as TrieError, Op, OpTarget, Trie, TrieId, TrieKey, TrieRef, TrieTransaction, RECYCLE,
     RECYCLE_REF, ROOT,
 };
-use utils::{Deserialize, Digest, Digestible, PathTools, Serialize};
+use utils::{bytes_stringify, Deserialize, Digest, Digestible, PathTools, Serialize};
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Invalid Operation, {0}")]
     InvalidOp(String),
     #[error("Decode error, {0}")]
-    DecodeError(String),
+    DecodeError(String, Backtrace),
     #[error("Trie error")]
     TrieError(#[from] TrieError),
     #[error("db error")]
@@ -41,7 +41,7 @@ type FileName = String;
 type FileUpdateMarker = Vec<u8>;
 
 /// the file IDs we managed, is reliable.
-type FileId = Vec<u8>;
+type FileId = u128;
 
 /// Since we will never conflict, use a simple u128 as the clock
 type Clock = u128;
@@ -70,6 +70,18 @@ impl Entity {
             update_marker,
             is_directory: true,
         }
+    }
+}
+
+impl Display for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.file_id.to_string())?;
+        if self.is_directory {
+            f.write_str(" dir")?;
+        } else {
+            f.write_str(" file")?;
+        }
+        Ok(())
     }
 }
 
@@ -141,45 +153,29 @@ pub struct Tracker<DBImpl: DB> {
 }
 
 impl<DBImpl: DB> Tracker<DBImpl> {
+    fn init(db: DBImpl) -> Result<Self> {
+        Trie::<u128, Entity, _>::init(db::DB::prefix(&db, DB_TRIE_PREFIX))?;
+        let mut transaction = db.start_transaction()?;
+        if !transaction.has(AUTO_INCREMENT_FILE_ID_KEY)? {
+            transaction.set(AUTO_INCREMENT_FILE_ID_KEY, 0u128.to_bytes())?;
+        }
+        if !transaction.has(CLOCK_KEY)? {
+            transaction.set(CLOCK_KEY, 0u128.to_bytes())?;
+        }
+        transaction.commit()?;
+        Ok(Tracker { db })
+    }
+
     fn trie(&self) -> Trie<u128, Entity, db::prefix::Prefix<&'_ DBImpl>> {
         Trie::from_db(db::DB::prefix(&self.db, DB_TRIE_PREFIX))
     }
 
-    // // fn get_file_status_on_vindex(
-    // //     &self,
-    // //     trie_id: TrieId,
-    // // ) -> Result<(FileIdentifier, FileUpdateToken)> {
-    // //     todo!()
-    // // }
-
-    // // fn get_id_by_full_path(&self, full_path: FileFullPath) -> Result<Option<TrieId>> {
-    // //     todo!()
-    // // }
-
-    // pub fn index(&self, input: IndexInput) -> Result<()> {
-    //     let mut trie = self.trie();
-    //     let trie_write = trie.write().unwrap();
-    //     if let IndexInput::Empty(full_path) = input {
-    //         trie_write.get_id_by_path(full_path)
-    //     }
-
-    //     let full_path = match input {
-    //         IndexInput::File(file_path, _, _, _) => file_path,
-    //         IndexInput::Directory(file_path, _, _, _) => file_path,
-    //         IndexInput::Empty(file_path) => file_path,
-    //     };
-
-    //     let parent_full_path = full_path.dirname();
-    //     if let Some(parent_id) = self.get_id_by_full_path(parent_full_path)? {
-    //         let
-    //     } else {
-    //     todo!()
-    // }
-
-    //     dbg!(full_path);
-
-    //     todo!()
-    // }
+    fn start_transaction(&self) -> db::Result<TrackerTransaction<DBImpl::Transaction<'_>>> {
+        Ok(TrackerTransaction {
+            db: self.db.start_transaction()?,
+            current_ops: Default::default(),
+        })
+    }
 }
 
 pub struct TrackerTransaction<DBImpl: DBRead + DBWrite + DBLock> {
@@ -190,7 +186,7 @@ pub struct TrackerTransaction<DBImpl: DBRead + DBWrite + DBLock> {
 impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
     fn lock(&mut self) -> Result<()> {
         self.auto_increment_clock()?;
-        self.trie().lock();
+        self.trie().lock()?;
 
         Ok(())
     }
@@ -207,7 +203,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
             .get(key)?
             .map(|d| TrieId::from_bytes(d.as_ref()))
             .transpose()
-            .map_err(Error::DecodeError)
+            .map_err(|err| Error::DecodeError(err, Backtrace::capture()))
     }
 
     fn marker_set(&mut self, file_marker: &FileMarker, file_id: &TrieId) -> Result<()> {
@@ -224,30 +220,31 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
             let bytes = self
                 .db
                 .get(AUTO_INCREMENT_FILE_ID_KEY)?
-                .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?;
+                .ok_or(Error::InvalidOp(
+                    "Tracker Database not initialized.".to_owned(),
+                ))?;
 
-            u128::from_be_bytes(
-                bytes
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| Error::DecodeError("failed to decode file id".to_string()))?,
-            )
+            u128::from_be_bytes(bytes.as_ref().try_into().map_err(|_| {
+                Error::DecodeError("failed to decode file id".to_string(), Backtrace::capture())
+            })?)
         };
 
-        let new_file_id = (old_file_id + 1).to_be_bytes().to_vec();
+        let new_file_id = old_file_id + 1;
 
-        self.db.set(AUTO_INCREMENT_FILE_ID_KEY, &new_file_id)?;
+        self.db
+            .set(AUTO_INCREMENT_FILE_ID_KEY, new_file_id.to_be_bytes())?;
 
         Ok(new_file_id)
     }
 
     fn auto_increment_clock(&mut self) -> Result<Clock> {
         let clock = {
-            let bytes = self
-                .db
-                .get_for_update(CLOCK_KEY)?
-                .ok_or(Error::InvalidOp("Database not initialized.".to_owned()))?;
-            Clock::from_bytes(bytes.as_ref()).map_err(Error::DecodeError)? + 1
+            let bytes = self.db.get_for_update(CLOCK_KEY)?.ok_or(Error::InvalidOp(
+                "Tracker Database not initialized.".to_owned(),
+            ))?;
+            Clock::from_bytes(bytes.as_ref())
+                .map_err(|err| Error::DecodeError(err, Backtrace::capture()))?
+                + 1
         };
 
         self.db.set(CLOCK_KEY, &clock.to_bytes())?;
@@ -255,20 +252,16 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
         Ok(clock)
     }
 
-    fn move_node(&mut self, node: TrieId, to: TrieId, key: TrieKey) -> Result<()> {
+    fn move_node_to_recycle(&mut self, node: TrieId) -> Result<()> {
         let new_clock = self.auto_increment_clock()?;
 
         self.apply(Op {
             marker: new_clock,
-            parent_target: to.into(),
-            child_key: key,
+            parent_target: RECYCLE.into(),
+            child_key: TrieKey(node.id().to_string()),
             child_target: node.into(),
             child_content: None,
         })
-    }
-
-    fn move_node_to_recycle(&mut self, node: TrieId) -> Result<()> {
-        self.move_node(node, RECYCLE, TrieKey(node.id().to_string()))
     }
 
     fn create_untracked_directory(&mut self, parent: TrieId, key: TrieKey) -> Result<()> {
@@ -283,21 +276,22 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
         })
     }
 
-    fn create_file(
+    fn create_node(
         &mut self,
         to: TrieId,
         key: TrieKey,
         marker: FileMarker,
         update_marker: FileUpdateMarker,
-    ) -> Result<()> {
+        is_directory: bool,
+    ) -> Result<TrieId> {
         let new_clock = self.auto_increment_clock()?;
         let new_id = self.trie().create_id()?;
 
         self.marker_set(&marker, &new_id)?;
 
-        let new_file = Entity {
+        let new_node = Entity {
             file_id: self.auto_increment_file_id()?,
-            is_directory: false,
+            is_directory,
             marker,
             update_marker,
         };
@@ -306,36 +300,60 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
             parent_target: to.into(),
             child_key: key,
             child_target: OpTarget::Id(new_id),
-            child_content: Some(new_file),
-        })
+            child_content: Some(new_node),
+        })?;
+
+        Ok(new_id)
     }
 
-    fn move_and_update_file(&mut self, to: TrieId, key: TrieKey, file: TrieId, update_marker: FileUpdateMarker) -> Result<()> {
-        
-    }
-
-    fn create_directory(&mut self, to: TrieId, key: TrieKey, marker: FileMarker) -> Result<()> {
+    fn move_and_update_node(
+        &mut self,
+        to: TrieId,
+        key: TrieKey,
+        node: TrieId,
+        old_content: &Entity,
+        update_marker: FileUpdateMarker,
+    ) -> Result<()> {
         let new_clock = self.auto_increment_clock()?;
-        let new_id = self.trie().create_id()?;
 
-        self.marker_set(&marker, &new_id)?;
-
-        let new_file = Entity {
-            file_id: self.auto_increment_file_id()?,
-            is_directory: false,
-            marker,
-            update_marker: Default::default(),
-        };
         self.apply(Op {
             marker: new_clock,
             parent_target: to.into(),
             child_key: key,
-            child_target: OpTarget::Id(new_id),
-            child_content: Some(new_file),
+            child_target: OpTarget::Id(node),
+            child_content: Some(Entity {
+                file_id: old_content.file_id.clone(),
+                is_directory: old_content.is_directory,
+                marker: old_content.marker.clone(),
+                update_marker,
+            }),
         })
     }
 
-    fn update_file_update_marker(
+    fn mark_node_as_untracked(
+        &mut self,
+        to: TrieId,
+        key: TrieKey,
+        node: TrieId,
+        node_content: Entity,
+    ) -> Result<()> {
+        let new_clock = self.auto_increment_clock()?;
+
+        self.apply(Op {
+            marker: new_clock,
+            parent_target: to.into(),
+            child_key: key,
+            child_target: OpTarget::Id(node),
+            child_content: Some(Entity {
+                file_id: self.auto_increment_file_id()?,
+                is_directory: node_content.is_directory,
+                marker: Default::default(),
+                update_marker: Default::default(),
+            }),
+        })
+    }
+
+    fn update_node_update_marker(
         &mut self,
         to: TrieId,
         key: TrieKey,
@@ -356,6 +374,95 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
                 update_marker,
             }),
         })
+    }
+
+    fn update_untrack_node(
+        &mut self,
+        to: TrieId,
+        key: TrieKey,
+        id: TrieId,
+        old_content: &Entity,
+        marker: FileUpdateMarker,
+        update_marker: FileUpdateMarker,
+    ) -> Result<()> {
+        let new_clock = self.auto_increment_clock()?;
+
+        self.marker_set(&marker, &id)?;
+
+        self.apply(Op {
+            marker: new_clock,
+            parent_target: to.into(),
+            child_key: key,
+            child_target: OpTarget::Id(id),
+            child_content: Some(Entity {
+                file_id: old_content.file_id,
+                is_directory: old_content.is_directory,
+                marker,
+                update_marker,
+            }),
+        })
+    }
+
+    fn create_or_move_node(
+        &mut self,
+        to: TrieId,
+        key: TrieKey,
+        marker: FileMarker,
+        update_marker: FileUpdateMarker,
+        is_directory: bool,
+    ) -> Result<TrieId> {
+        let old_child_id = self.trie().get_child(to, key.clone())?;
+        if let Some(old_child_id) = old_child_id {
+            let old_child = self.trie().get_ensure(old_child_id)?;
+            if old_child.content.is_directory != is_directory {
+                self.move_node_to_recycle(old_child_id)?;
+            } else if old_child.content.marker.is_empty() {
+                if self.marker_get(&marker)?.is_some() {
+                    self.move_node_to_recycle(old_child_id)?;
+                } else {
+                    self.update_untrack_node(
+                        to,
+                        key,
+                        old_child_id,
+                        &old_child.content,
+                        marker,
+                        update_marker,
+                    )?;
+                    return Ok(old_child_id);
+                }
+            } else if old_child.content.marker != marker {
+                self.move_node_to_recycle(old_child_id)?;
+            } else if old_child.content.update_marker != update_marker {
+                self.update_node_update_marker(
+                    to,
+                    key,
+                    old_child_id,
+                    &old_child.content,
+                    update_marker,
+                )?;
+                return Ok(old_child_id);
+            } else {
+                return Ok(old_child_id);
+            }
+        }
+
+        if let Some(old_id) = self.marker_get(&marker)? {
+            let old_file = self.trie().get_ensure(old_id)?;
+            if !self.trie().is_ancestor(to, old_id)? {
+                self.move_and_update_node(to, key, old_id, &old_file.content, update_marker)?;
+                Ok(old_id)
+            } else {
+                self.mark_node_as_untracked(
+                    old_file.parent,
+                    old_file.key,
+                    old_id,
+                    old_file.content,
+                )?;
+                self.create_node(to, key, marker, update_marker, is_directory)
+            }
+        } else {
+            self.create_node(to, key, marker, update_marker, is_directory)
+        }
     }
 
     fn apply(&mut self, op: Op<u128, Entity>) -> Result<()> {
@@ -410,44 +517,13 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
 
             if let IndexInput::File(full_path, _, file_marker, file_update_marker) = input {
                 let file_name = PathTools::basename(full_path.as_ref());
-                let old_child_id = self
-                    .trie()
-                    .get_child(parent_id, file_name.to_owned().into())?;
-
-                if let Some(old_child_id) = old_child_id {
-                    let old_child = self.trie().get_ensure(old_child_id)?;
-                    if old_child.content.is_directory {
-                        self.move_node_to_recycle(old_child_id)?;
-                        if let Some(old_id) = self.marker_get(&file_marker)? {
-                            
-                        }
-                        self.create_file(
-                            parent_id,
-                            file_name.to_owned().into(),
-                            file_marker,
-                            file_update_marker,
-                        )?;
-                    } else {
-                        // old is file
-                        if old_child.content.marker != file_marker {
-                            self.move_node_to_recycle(old_child_id)?;
-                            self.create_file(
-                                parent_id,
-                                file_name.to_owned().into(),
-                                file_marker,
-                                file_update_marker,
-                            )?;
-                        } else if old_child.content.update_marker != file_update_marker {
-                            self.update_file_update_marker(
-                                parent_id,
-                                file_name.to_owned().into(),
-                                old_child_id,
-                                &old_child.content,
-                                file_update_marker,
-                            )?;
-                        }
-                    }
-                }
+                self.create_or_move_node(
+                    parent_id,
+                    file_name.to_owned().into(),
+                    file_marker,
+                    file_update_marker,
+                    false,
+                )?;
             } else if let IndexInput::Directory(
                 full_path,
                 dir_marker,
@@ -456,21 +532,90 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
             ) = input
             {
                 let file_name = PathTools::basename(full_path.as_ref());
-                let old_child_id = self
-                    .trie()
-                    .get_child(parent_id, file_name.to_owned().into())?;
-
-                if let Some(old_child_id) = old_child_id {
-                    let old_child = self.trie().get_ensure(old_child_id)?;
-                    if !old_child.content.is_directory {
-                        self.move_node_to_recycle(old_child_id)?;
-                    }
+                let parent_id = self.create_or_move_node(
+                    parent_id,
+                    file_name.to_owned().into(),
+                    dir_marker,
+                    dir_update_marker,
+                    true,
+                )?;
+                for (file_name, file_type, marker, update_marker) in children {
+                    self.create_or_move_node(
+                        parent_id,
+                        file_name.to_owned().into(),
+                        marker,
+                        update_marker,
+                        file_type == FileType::Directory,
+                    )?;
                 }
             } else {
                 unreachable!()
             }
 
-            todo!()
+            Ok(core::mem::take(&mut self.current_ops))
         }
+    }
+}
+
+impl<DBImpl: DBTransaction> TrackerTransaction<DBImpl> {
+    pub fn commit(self) -> Result<()> {
+        self.db.commit()?;
+        Ok(())
+    }
+
+    pub fn rollback(self) -> Result<()> {
+        self.db.rollback()?;
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use db::backend::memory::MemoryDB;
+    use file::{FileFullPath, FileType};
+
+    use super::{IndexInput, Tracker};
+
+    #[test]
+    fn test() {
+        let db = MemoryDB::default();
+        let tracker = Tracker::init(db).unwrap();
+        let mut transaction = tracker.start_transaction().unwrap();
+
+        dbg!(transaction
+            .index(IndexInput::Directory(
+                FileFullPath::parse("/abc/eee"),
+                vec![1],
+                vec![0],
+                vec![
+                    ("a".to_string(), FileType::File, vec![2], vec![0]),
+                    ("b".to_string(), FileType::File, vec![3], vec![0])
+                ],
+            ))
+            .unwrap());
+        dbg!(transaction
+            .index(IndexInput::Directory(
+                FileFullPath::parse("/abc/eee"),
+                vec![1],
+                vec![0],
+                vec![
+                    ("a".to_string(), FileType::File, vec![2], vec![0]),
+                    ("b".to_string(), FileType::Directory, vec![4], vec![0])
+                ],
+            ))
+            .unwrap());
+        dbg!(transaction
+            .index(IndexInput::Directory(
+                FileFullPath::parse("/abc/eee/b"),
+                vec![4],
+                vec![0],
+                vec![
+                    ("a".to_string(), FileType::Directory, vec![1], vec![0]) // ("b".to_string(), FileType::Directory, vec![4], vec![0])
+                ],
+            ))
+            .unwrap());
+
+        transaction.commit().unwrap();
+
+        println!("{}", tracker.trie());
     }
 }

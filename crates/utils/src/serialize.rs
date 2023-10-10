@@ -193,11 +193,11 @@ impl Deserialize for u128 {
     fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
         Ok((
             Self::from_be_bytes(
-                bytes[0..8]
+                bytes[0..16]
                     .try_into()
                     .map_err(|_| format!("Failed to decode u128: {bytes:?}"))?,
             ),
-            &bytes[8..],
+            &bytes[16..],
         ))
     }
 }
