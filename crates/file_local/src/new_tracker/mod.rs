@@ -330,29 +330,6 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
         })
     }
 
-    fn mark_node_as_untracked(
-        &mut self,
-        to: TrieId,
-        key: TrieKey,
-        node: TrieId,
-        node_content: Entity,
-    ) -> Result<()> {
-        let new_clock = self.auto_increment_clock()?;
-
-        self.apply(Op {
-            marker: new_clock,
-            parent_target: to.into(),
-            child_key: key,
-            child_target: OpTarget::Id(node),
-            child_content: Some(Entity {
-                file_id: self.auto_increment_file_id()?,
-                is_directory: node_content.is_directory,
-                marker: Default::default(),
-                update_marker: Default::default(),
-            }),
-        })
-    }
-
     fn update_node_update_marker(
         &mut self,
         to: TrieId,
@@ -448,18 +425,8 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
 
         if let Some(old_id) = self.marker_get(&marker)? {
             let old_file = self.trie().get_ensure(old_id)?;
-            if !self.trie().is_ancestor(to, old_id)? {
-                self.move_and_update_node(to, key, old_id, &old_file.content, update_marker)?;
-                Ok(old_id)
-            } else {
-                self.mark_node_as_untracked(
-                    old_file.parent,
-                    old_file.key,
-                    old_id,
-                    old_file.content,
-                )?;
-                self.create_node(to, key, marker, update_marker, is_directory)
-            }
+            self.move_and_update_node(to, key, old_id, &old_file.content, update_marker)?;
+            Ok(old_id)
         } else {
             self.create_node(to, key, marker, update_marker, is_directory)
         }
