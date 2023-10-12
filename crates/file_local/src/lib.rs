@@ -13,6 +13,7 @@ use parking_lot::Mutex;
 use utils::PathTools;
 
 mod new_tracker;
+mod new_new_tracker;
 mod tracker;
 mod walker;
 pub mod watcher;
