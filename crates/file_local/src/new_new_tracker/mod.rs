@@ -1,19 +1,21 @@
 //! database for local file system provider.
 //!
 //! The local file system not have a way to save metadata, tags, notes on files.
-//! We use an additional database to track local files and store the data associated with the files.
+//! We use an additional database to track local files and store the data
+//! associated with the files.
 
 mod discovery;
 mod entity;
+mod marker;
+
+pub use discovery::*;
+pub use entity::*;
+pub use marker::*;
 
 use db::{DBLock, DBRead, DBTransaction, DBWrite, DB};
 use thiserror::Error;
 use trie::trie::{Error as TrieError, Op, Trie, TrieId, TrieTransaction};
 use utils::{Deserialize, Serialize};
-
-use entity::Entity;
-
-use self::discovery::Discovery;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -30,16 +32,6 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-/// store file system level file identifier, e.g. inode number in linux, file_id in windows
-/// https://man7.org/linux/man-pages/man7/inode.7.html
-/// https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info
-///
-/// Sometimes reliable, sometimes not
-type FileMarker = Vec<u8>;
-
-/// Store information about whether the file is updated, Usually is a combination of file mtime and size.
-type FileUpdateMarker = Vec<u8>;
 
 /// Since we will never conflict, use a simple u128 as the clock
 type Clock = u128;
@@ -83,6 +75,12 @@ pub struct TrackerTransaction<DBImpl: DBRead + DBWrite + DBLock> {
 }
 
 impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
+    fn do_op(&mut self, op: Op<Clock, Entity>) -> Result<()> {
+        self.trie().apply(vec![op.clone()])?;
+        self.current_ops.push(op);
+        Ok(())
+    }
+
     fn auto_increment_clock(&mut self) -> Result<Clock> {
         let clock = {
             let bytes = self.db.get_for_update(CLOCK_KEY)?.ok_or(Error::InvalidOp(
@@ -120,6 +118,46 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
         Ok(())
     }
 
+    fn delete_marker(&mut self, file_marker: &FileMarker) -> Result<()> {
+        let mut key = Vec::with_capacity(MARKERS_PREFIX.len() + file_marker.len());
+        key.extend_from_slice(MARKERS_PREFIX);
+        key.extend_from_slice(file_marker);
+        self.db.delete(key)?;
+
+        Ok(())
+    }
+
+    fn move_node_to_recycle(&mut self, node: TrieId) -> Result<()> {
+        let new_clock = self.auto_increment_clock()?;
+
+        self.do_op(Op {
+            marker: new_clock,
+            parent_target: trie::trie::RECYCLE.into(),
+            child_key: node.id().to_string().into(),
+            child_target: node.into(),
+            child_content: None,
+        })
+    }
+
+    fn move_entity_to(&mut self, parent: TrieId, entity: DiscoveryEntity) -> Result<()> {
+        let exist_id = self
+            .get_marker(&entity.marker)?
+            .map(|id| self.trie().get(id).map(|e| e.map(|e| (id, e))))
+            .transpose()?
+            .flatten();
+        let new_clock = self.auto_increment_clock()?;
+
+        
+
+        self.do_op(Op {
+            marker: new_clock,
+            parent_target: trie::trie::RECYCLE.into(),
+            child_key: node.id().to_string().into(),
+            child_target: node.into(),
+            child_content: None,
+        })
+    }
+
     fn lock(&mut self) -> Result<()> {
         self.auto_increment_clock()?;
         self.trie().lock()?;
@@ -130,8 +168,8 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
     pub fn apply(&mut self, input: Discovery) -> Result<Vec<Op<Clock, Entity>>> {
         let mut target: TrieId;
 
-        if let Some(location_marker) = input.location_marker() {
-            if let Some(id) = self.get_marker(location_marker)? {
+        if !input.location_marker().is_empty() {
+            if let Some(id) = self.get_marker(input.location_marker())? {
                 target = id;
             } else {
                 return Err(Error::InvalidOp("Location not found".to_string()));
@@ -150,13 +188,13 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
             old_entities.push(child?);
         }
 
-        for (name, marker, update_marker) in input.entities {
+        for entity in input.entities {
             let old_entity_id = {
                 old_entities
                     .iter()
                     .enumerate()
-                    .find_map(|(i, entity)| {
-                        if entity.0.as_str() == name {
+                    .find_map(|(i, (key, _))| {
+                        if key.as_str() == entity.name {
                             Some(i)
                         } else {
                             None
@@ -168,25 +206,29 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
             if let Some(old_entity_id) = old_entity_id {
                 let old_entity = self.trie().get_ensure(old_entity_id)?;
                 let old_marker = old_entity.content.marker;
-                let old_update_marker = old_entity.content.update_marker;
-                if matches!((marker, old_marker), (Some(marker), old_marker) if marker == old_marker)
-                {
-                    
-                }
-                if let Some(marker) = marker {
-                    if marker == old_entity.content.marker {
-                        if update_marker != old_entity.content.update_marker {
-                            // update
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        // move old to recycle, move new here
-                    }
-                } else if update_marker != old_entity.content.update_marker {
-                    // update
+                let marker = if entity.marker.is_empty() {
+                    old_marker.clone()
                 } else {
-                    //
+                    entity.marker
+                }; // if marker is empty, same as old_marker
+                let old_update_marker = old_entity.content.update_marker;
+                let update_marker = entity.update_marker;
+                let old_type_marker = old_entity.content.type_marker;
+                let type_marker = entity.type_marker;
+
+                if marker == old_marker && type_marker == old_type_marker {
+                    if update_marker != old_update_marker {
+                        // update
+                    } else {
+                        continue;
+                    }
+                } else {
+                    // move old to recycle, move new here
+                    if marker == old_marker && !old_marker.is_empty() {
+                        self.delete_marker(&old_marker)?;
+                    }
+                    self.move_node_to_recycle(old_entity_id)?;
+                    self.move_entity_to(parent, entity)?;
                 }
             } else {
                 // create
