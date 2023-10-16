@@ -47,7 +47,7 @@ const MARKERS_PREFIX: &[u8] = b"mk:";
 const CLOCK_KEY: &[u8] = b"current_clock";
 
 impl<DBImpl: DB> Tracker<DBImpl> {
-    fn init(db: DBImpl) -> Result<Self> {
+    pub fn init(db: DBImpl) -> Result<Self> {
         Trie::<Clock, Entity, _>::init(db::DB::prefix(&db, DB_TRIE_PREFIX))?;
         let mut transaction = db.start_transaction()?;
         if !transaction.has(CLOCK_KEY)? {
@@ -57,11 +57,11 @@ impl<DBImpl: DB> Tracker<DBImpl> {
         Ok(Tracker { db })
     }
 
-    fn trie(&self) -> Trie<u128, Entity, db::prefix::Prefix<&'_ DBImpl>> {
+    pub fn trie(&self) -> Trie<u128, Entity, db::prefix::Prefix<&'_ DBImpl>> {
         Trie::from_db(db::DB::prefix(&self.db, DB_TRIE_PREFIX))
     }
 
-    fn start_transaction(&self) -> db::Result<TrackerTransaction<DBImpl::Transaction<'_>>> {
+    pub fn start_transaction(&self) -> db::Result<TrackerTransaction<DBImpl::Transaction<'_>>> {
         Ok(TrackerTransaction {
             db: self.db.start_transaction()?,
             current_ops: Default::default(),
@@ -190,6 +190,8 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
     }
 
     pub fn apply(&mut self, input: Discovery) -> Result<Vec<Op<Clock, Entity>>> {
+        self.lock()?;
+
         let target: TrieId;
 
         if !input.location_marker().is_empty() {

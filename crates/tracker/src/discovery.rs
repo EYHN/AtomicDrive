@@ -1,5 +1,3 @@
-use file::FileFullPath;
-
 use super::{FileMarker, FileName, FileUpdateMarker, FileTypeMarker};
 
 #[derive(Debug, Clone)]
@@ -12,12 +10,12 @@ pub struct DiscoveryEntity {
 
 #[derive(Debug)]
 pub struct Discovery {
-    pub location: (FileFullPath, FileMarker),
+    pub location: (String, FileMarker),
     pub entities: Vec<DiscoveryEntity>,
 }
 
 impl Discovery {
-    pub fn location_full_path(&self) -> &FileFullPath {
+    pub fn location_full_path(&self) -> &str {
         &self.location.0
     }
     pub fn location_marker(&self) -> &FileMarker {

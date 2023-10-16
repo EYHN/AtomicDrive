@@ -43,10 +43,16 @@ pub const CONFLICT_REF: TrieRef = TrieRef(1u128.to_be_bytes());
 pub const RECYCLE_REF: TrieRef = TrieRef(2u128.to_be_bytes());
 
 /// Tree node id
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[derive(Default, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct TrieId(pub [u8; 8]);
 
 impl Display for TrieId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&u64::from_be_bytes(self.0), f)
+    }
+}
+
+impl Debug for TrieId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Display::fmt(&u64::from_be_bytes(self.0), f)
     }
@@ -429,7 +435,7 @@ impl Deserialize for OpTarget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Op<M: TrieMarker, C: TrieContent> {
     pub marker: M,
     pub parent_target: OpTarget,
@@ -476,6 +482,15 @@ impl<M: TrieMarker, C: TrieContent> Deserialize for Op<M, C> {
                 child_content,
             },
             bytes,
+        ))
+    }
+}
+
+impl<M: TrieMarker + Debug, C: TrieContent + Debug> Debug for Op<M, C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "Move {{{:?}}} to {{{:?}}}:{{{}}} \"{:?}\" [{:?}]",
+            self.child_target, self.parent_target, self.child_key, self.child_content, self.marker
         ))
     }
 }
