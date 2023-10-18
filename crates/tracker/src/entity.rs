@@ -1,10 +1,10 @@
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 
 use utils::{bytes_stringify, Deserialize, Digest, Digestible, Serialize};
 
 use super::{FileMarker, FileTypeMarker, FileUpdateMarker};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Entity {
     pub marker: FileMarker,
     pub update_marker: FileUpdateMarker,
@@ -12,6 +12,17 @@ pub struct Entity {
 }
 
 impl Display for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "`{}`({})({})",
+            bytes_stringify(&self.marker),
+            bytes_stringify(&self.update_marker),
+            bytes_stringify(&self.type_marker)
+        ))
+    }
+}
+
+impl Debug for Entity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
             "`{}`({})({})",

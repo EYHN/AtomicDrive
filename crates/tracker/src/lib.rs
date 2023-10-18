@@ -61,7 +61,7 @@ impl<DBImpl: DB> Tracker<DBImpl> {
         Trie::from_db(db::DB::prefix(&self.db, DB_TRIE_PREFIX))
     }
 
-    pub fn start_transaction(&self) -> db::Result<TrackerTransaction<DBImpl::Transaction<'_>>> {
+    pub fn start_transaction(&self) -> Result<TrackerTransaction<DBImpl::Transaction<'_>>> {
         Ok(TrackerTransaction {
             db: self.db.start_transaction()?,
             current_ops: Default::default(),
@@ -219,6 +219,8 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
             if !entity.marker.is_empty() {
                 let marker = self.get_marker(&entity.marker)?;
                 entities.push((entity, marker))
+            } else {
+                entities.push((entity, None))
             }
         }
 

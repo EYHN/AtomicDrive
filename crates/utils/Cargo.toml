@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 utils_macros = { path = "macros" }
 smallvec = "1"
+xxhash-rust = { version = "0.8.6", features = ["xxh3"] }

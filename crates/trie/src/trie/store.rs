@@ -479,13 +479,13 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     pub fn init(db: DBImpl) -> Result<Self> {
         let mut this = Self::from_db(db);
 
-        let mut writer = this.write()?;
-        writer.db_set(
+        let mut transaction = this.start_transaction()?;
+        transaction.db_set(
             Keys::AutoIncrementId,
             Values::AutoIncrementId(TrieId::from(10)),
         )?;
-        writer.db_set(Keys::LogTotalLength, Values::LogTotalLength(0))?;
-        writer.db_set(
+        transaction.db_set(Keys::LogTotalLength, Values::LogTotalLength(0))?;
+        transaction.db_set(
             Keys::NodeInfo(ROOT),
             Values::NodeInfo(TrieNode {
                 parent: ROOT,
@@ -493,7 +493,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
                 content: Default::default(),
             }),
         )?;
-        writer.db_set(
+        transaction.db_set(
             Keys::NodeInfo(CONFLICT),
             Values::NodeInfo(TrieNode {
                 parent: CONFLICT,
@@ -501,7 +501,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
                 content: Default::default(),
             }),
         )?;
-        writer.db_set(
+        transaction.db_set(
             Keys::NodeInfo(RECYCLE),
             Values::NodeInfo(TrieNode {
                 parent: RECYCLE,
@@ -509,21 +509,21 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
                 content: Default::default(),
             }),
         )?;
-        writer.db_set(Keys::RefIdIndex(ROOT_REF), Values::RefIdIndex(ROOT))?;
-        writer.db_set(Keys::IdRefsIndex(ROOT), Values::IdRefsIndex(vec![ROOT_REF]))?;
-        writer.db_set(Keys::RefIdIndex(CONFLICT_REF), Values::RefIdIndex(CONFLICT))?;
-        writer.db_set(
+        transaction.db_set(Keys::RefIdIndex(ROOT_REF), Values::RefIdIndex(ROOT))?;
+        transaction.db_set(Keys::IdRefsIndex(ROOT), Values::IdRefsIndex(vec![ROOT_REF]))?;
+        transaction.db_set(Keys::RefIdIndex(CONFLICT_REF), Values::RefIdIndex(CONFLICT))?;
+        transaction.db_set(
             Keys::IdRefsIndex(CONFLICT),
             Values::IdRefsIndex(vec![CONFLICT_REF]),
         )?;
-        writer.db_set(Keys::RefIdIndex(RECYCLE_REF), Values::RefIdIndex(RECYCLE))?;
-        writer.db_set(
+        transaction.db_set(Keys::RefIdIndex(RECYCLE_REF), Values::RefIdIndex(RECYCLE))?;
+        transaction.db_set(
             Keys::IdRefsIndex(RECYCLE),
             Values::IdRefsIndex(vec![RECYCLE_REF]),
         )?;
-        writer.db_set(Keys::GlobalLock, Values::GlobalLock(true))?;
+        transaction.db_set(Keys::GlobalLock, Values::GlobalLock(true))?;
 
-        writer.commit()?;
+        transaction.commit()?;
 
         Ok(this)
     }
@@ -659,7 +659,7 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
         })
     }
 
-    pub fn write(&'_ mut self) -> Result<TrieStoreTransaction<DBImpl::Transaction<'_>, M, C>> {
+    pub fn start_transaction(&'_ mut self) -> Result<TrieStoreTransaction<DBImpl::Transaction<'_>, M, C>> {
         let transaction = TrieStoreTransaction::from_db(self.db.start_transaction()?);
 
         transaction.lock()?;

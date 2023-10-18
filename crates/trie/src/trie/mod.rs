@@ -48,13 +48,18 @@ pub struct TrieId(pub [u8; 8]);
 
 impl Display for TrieId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&u64::from_be_bytes(self.0), f)
+        match *self {
+            ROOT => f.write_str("ROOT"),
+            CONFLICT => f.write_str("CONFLICT"),
+            RECYCLE => f.write_str("RECYCLE"),
+            _ => Display::fmt(&u64::from_be_bytes(self.0), f),
+        }
     }
 }
 
 impl Debug for TrieId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&u64::from_be_bytes(self.0), f)
+        Display::fmt(self, f)
     }
 }
 
@@ -373,11 +378,21 @@ impl<C: TrieContent> Deserialize for Undo<C> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum OpTarget {
     Ref(TrieRef),
     Id(TrieId),
     NewId,
+}
+
+impl Debug for OpTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ref(r) => f.write_fmt(format_args!("&{:?}", r)),
+            Self::Id(id) => f.write_fmt(format_args!("#{:?}", id)),
+            Self::NewId => write!(f, "*"),
+        }
+    }
 }
 
 impl From<TrieId> for OpTarget {
@@ -489,8 +504,18 @@ impl<M: TrieMarker, C: TrieContent> Deserialize for Op<M, C> {
 impl<M: TrieMarker + Debug, C: TrieContent + Debug> Debug for Op<M, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
-            "Move {{{:?}}} to {{{:?}}}:{{{}}} \"{:?}\" [{:?}]",
-            self.child_target, self.parent_target, self.child_key, self.child_content, self.marker
+            "Move {:?} to {:?}:{{{}}}{}[{:?}]",
+            self.child_target,
+            self.parent_target,
+            self.child_key,
+            {
+                if let Some(child_content) = &self.child_content {
+                    format!(" \"{:?}\" ", child_content)
+                } else {
+                    " keep before ".to_string()
+                }
+            },
+            self.marker
         ))
     }
 }
@@ -583,7 +608,7 @@ impl<M: TrieMarker, C: TrieContent, DBImpl: DB> Trie<M, C, DBImpl> {
 
     pub fn write(&mut self) -> Result<TrieTransaction<M, C, DBImpl::Transaction<'_>>> {
         Ok(TrieTransaction {
-            transaction: self.store.write()?,
+            transaction: self.store.start_transaction()?,
         })
     }
 

@@ -3,7 +3,7 @@ use std::{fmt::Display, string::FromUtf8Error};
 use utils::PathTools;
 
 #[derive(
-    Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord,
 )]
 pub struct FileFullPath {
     value: String,

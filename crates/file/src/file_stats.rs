@@ -1,6 +1,6 @@
 use crate::FileType;
 
-#[derive(Debug, Clone, Hash, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Default)]
 pub struct FileStats {
     pub creation_time: u64,
     pub last_write_time: u64,

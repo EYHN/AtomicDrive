@@ -178,6 +178,30 @@ impl Deserialize for u64 {
     }
 }
 
+impl Serialize for i64 {
+    fn serialize(&self, mut bytes: Serializer) -> Serializer {
+        bytes.extend_from_slice(&self.to_be_bytes());
+        bytes
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(size_of::<i64>())
+    }
+}
+
+impl Deserialize for i64 {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        Ok((
+            Self::from_be_bytes(
+                bytes[0..8]
+                    .try_into()
+                    .map_err(|_| format!("Failed to decode u64: {bytes:?}"))?,
+            ),
+            &bytes[8..],
+        ))
+    }
+}
+
 impl Serialize for u128 {
     fn serialize(&self, mut bytes: Serializer) -> Serializer {
         bytes.extend_from_slice(&self.to_be_bytes());
@@ -247,6 +271,50 @@ impl<A: Deserialize, B: Deserialize> Deserialize for (A, B) {
         let (a, rest) = A::deserialize(bytes)?;
         let (b, rest) = B::deserialize(rest)?;
         Ok(((a, b), rest))
+    }
+}
+
+impl<A: Serialize, B: Serialize, C: Serialize> Serialize for (A, B, C) {
+    fn serialize(&self, bytes: Serializer) -> Serializer {
+        let bytes = self.0.serialize(bytes);
+        let bytes = self.1.serialize(bytes);
+        self.2.serialize(bytes)
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(self.0.byte_size()? + self.1.byte_size()? + self.2.byte_size()?)
+    }
+}
+
+impl<A: Deserialize, B: Deserialize, C: Deserialize> Deserialize for (A, B, C) {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        let (a, rest) = A::deserialize(bytes)?;
+        let (b, rest) = B::deserialize(rest)?;
+        let (c, rest) = C::deserialize(rest)?;
+        Ok(((a, b, c), rest))
+    }
+}
+
+impl<A: Serialize, B: Serialize, C: Serialize, D: Serialize> Serialize for (A, B, C, D) {
+    fn serialize(&self, bytes: Serializer) -> Serializer {
+        let bytes = self.0.serialize(bytes);
+        let bytes = self.1.serialize(bytes);
+        let bytes = self.2.serialize(bytes);
+        self.3.serialize(bytes)
+    }
+
+    fn byte_size(&self) -> Option<usize> {
+        Some(self.0.byte_size()? + self.1.byte_size()? + self.2.byte_size()? + self.3.byte_size()?)
+    }
+}
+
+impl<A: Deserialize, B: Deserialize, C: Deserialize, D: Deserialize> Deserialize for (A, B, C, D) {
+    fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), String> {
+        let (a, rest) = A::deserialize(bytes)?;
+        let (b, rest) = B::deserialize(rest)?;
+        let (c, rest) = C::deserialize(rest)?;
+        let (d, rest) = D::deserialize(rest)?;
+        Ok(((a, b, c, d), rest))
     }
 }
 
