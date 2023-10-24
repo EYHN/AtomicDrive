@@ -1,14 +1,11 @@
 [workspace]
 members = [
     "./crates/file",
-    "./crates/file_local",
     "./crates/utils",
-    "./crates/vindex",
     "./crates/sync",
     "./crates/chunk",
     "./crates/trie",
-    "./crates/db",
-    "./crates/tracker"
+    "./crates/db"
 ]
 
 [profile.bench]

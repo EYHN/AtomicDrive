@@ -1,6 +1,12 @@
-mod drive;
+// mod drive;
 
-pub use drive::SyncingDrive;
+// pub use drive::SyncingDrive;
+
+pub struct SyncingDrive {
+    file_system: Arc<LocalFileSystem>,
+    pub vindex: Arc<Mutex<VIndex<HashChunks>>>,
+    watcher: LocalFileSystemWatcher,
+}
 
 // use std::path::PathBuf;
 

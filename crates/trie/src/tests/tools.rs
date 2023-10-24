@@ -4,7 +4,7 @@ use crdts::{CmRDT, VClock};
 use db::backend::memory::MemoryDB;
 use utils::{Deserialize, PathTools, Serialize, Serializer};
 
-use super::super::{Op, Trie, TrieKey, TrieRef};
+use super::super::{Op, Trie, TrieKey, TrieRef, TrieStoreRead};
 
 #[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub struct Marker {
@@ -124,18 +124,16 @@ impl End {
             .get_refs_by_path(from)
             .unwrap()
             .unwrap()
-            .next()
+            .first()
             .unwrap()
-            .borrow()
             .clone();
         let filename = PathTools::basename(to).to_owned();
         let to = writer
             .get_refs_by_path(PathTools::dirname(to))
             .unwrap()
             .unwrap()
-            .next()
+            .first()
             .unwrap()
-            .borrow()
             .clone();
 
         self.clock.apply(self.clock.inc(self.actor));
@@ -163,9 +161,8 @@ impl End {
             .get_refs_by_path(PathTools::dirname(to))
             .unwrap()
             .unwrap()
-            .next()
+            .first()
             .unwrap()
-            .borrow()
             .clone();
 
         self.clock.apply(self.clock.inc(self.actor));

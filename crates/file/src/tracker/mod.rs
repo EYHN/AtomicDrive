@@ -1,4 +1,4 @@
-//! database for local file system provider.
+//! database for local file system.
 //!
 //! The local file system not have a way to save metadata, tags, notes on files.
 //! We use an additional database to track local files and store the data
@@ -14,7 +14,7 @@ pub use marker::*;
 
 use db::{DBLock, DBRead, DBTransaction, DBWrite, DB};
 use thiserror::Error;
-use trie::trie::{Error as TrieError, Op, OpTarget, Trie, TrieId, TrieTransaction};
+use trie::{Error as TrieError, Op, OpTarget, Trie, TrieId, TrieTransaction, store::TrieStoreRead};
 use utils::{Deserialize, Serialize};
 
 #[derive(Error, Debug)]
@@ -38,7 +38,7 @@ type Clock = u128;
 
 type FileName = String;
 
-pub struct Tracker<DBImpl: DB> {
+pub struct Tracker<DBImpl> {
     db: DBImpl,
 }
 
@@ -57,15 +57,21 @@ impl<DBImpl: DB> Tracker<DBImpl> {
         Ok(Tracker { db })
     }
 
-    pub fn trie(&self) -> Trie<u128, Entity, db::prefix::Prefix<&'_ DBImpl>> {
-        Trie::from_db(db::DB::prefix(&self.db, DB_TRIE_PREFIX))
-    }
-
     pub fn start_transaction(&self) -> Result<TrackerTransaction<DBImpl::Transaction<'_>>> {
         Ok(TrackerTransaction {
             db: self.db.start_transaction()?,
             current_ops: Default::default(),
         })
+    }
+}
+
+impl<DBImpl: DBRead> Tracker<DBImpl> {
+    pub fn trie(&self) -> Trie<u128, Entity, db::prefix::Prefix<&'_ DBImpl>> {
+        Trie::from_db(db::prefix::Prefix::new(&self.db, DB_TRIE_PREFIX))
+    }
+
+    pub fn from_db(db: DBImpl) -> Self {
+        Self { db }
     }
 }
 
@@ -75,6 +81,13 @@ pub struct TrackerTransaction<DBImpl: DBRead + DBWrite + DBLock> {
 }
 
 impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
+    pub fn from_db(db: DBImpl) -> Self {
+        Self {
+            db,
+            current_ops: Default::default(),
+        }
+    }
+
     fn do_op(&mut self, op: Op<Clock, Entity>) -> Result<()> {
         self.trie().apply(vec![op.clone()])?;
         self.current_ops.push(op);
@@ -132,7 +145,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
 
         self.do_op(Op {
             marker: new_clock,
-            parent_target: trie::trie::RECYCLE.into(),
+            parent_target: trie::RECYCLE.into(),
             child_key: node.id().to_string().into(),
             child_target: node.into(),
             child_content: None,
@@ -211,7 +224,7 @@ impl<DBImpl: DBRead + DBWrite + DBLock> TrackerTransaction<DBImpl> {
 
         let mut old_entities = vec![];
         for child in self.trie().get_children(target)? {
-            old_entities.push(child?);
+            old_entities.push(child);
         }
 
         let mut entities = vec![];

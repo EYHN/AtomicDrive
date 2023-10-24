@@ -2,7 +2,8 @@ mod file_type;
 mod file_event;
 mod file_path;
 mod file_stats;
-mod local;
+pub mod local;
+pub mod tracker;
 
 pub use file_type::*;
 pub use file_event::*;

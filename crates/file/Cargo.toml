@@ -6,6 +6,6 @@ edition = "2021"
 [dependencies]
 utils = { path = "../utils" }
 db = { path = "../db" }
+trie = { path = "../trie" }
 num_enum = "0.5"
 thiserror = "1.0"
-tracker = { path = "../tracker" }

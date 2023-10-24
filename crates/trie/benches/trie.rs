@@ -3,7 +3,7 @@ pub use criterion::*;
 #[cfg(codspeed)]
 pub use codspeed_criterion_compat::*;
 use db::backend::memory::MemoryDB;
-use trie::trie::{Op, Trie, TrieKey, TrieRef};
+use trie::{Op, Trie, TrieKey, TrieRef};
 
 fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("[db backend] trie apply 100 ops ordered", |b| {

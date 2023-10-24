@@ -104,6 +104,7 @@ impl Deserialize for Keys {
                 let (log_id, rest) = u64::deserialize(args)?;
                 Ok((Self::Log(log_id), rest))
             }
+            b"global_lock" => Ok((Self::GlobalLock, args)),
             _ => Err("Failed deserialize keys.".to_string()),
         }
     }
@@ -460,14 +461,134 @@ mod values_tests {
     }
 }
 
+pub trait TrieStoreRead<M: TrieMarker, C: TrieContent> {
+    type DBReadImpl<'a>: DBRead
+    where
+        Self: 'a;
+    fn db<'a>(&'a self) -> Self::DBReadImpl<'a>;
+
+    fn db_get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
+        if let Some(value) = self.db().get(key.to_bytes())? {
+            Ok(Some(Values::parse(&key, value.as_ref())?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
+        self.db_get(Keys::RefIdIndex(r))?
+            .map(|v| v.ref_id_index())
+            .transpose()
+    }
+
+    fn get_id_ensure(&self, r: TrieRef) -> Result<TrieId> {
+        self.db_get(Keys::RefIdIndex(r))?
+            .ok_or(Error::TreeBroken("ref not found".to_string()))
+            .and_then(|v| v.ref_id_index())
+    }
+
+    fn get_refs(&self, id: TrieId) -> Result<Option<Vec<TrieRef>>> {
+        self.db_get(Keys::IdRefsIndex(id))?
+            .map(|v| v.id_refs_index())
+            .transpose()
+    }
+
+    fn get(&self, id: TrieId) -> Result<Option<TrieNode<C>>> {
+        self.db_get(Keys::NodeInfo(id))?
+            .map(|v| v.node_info())
+            .transpose()
+    }
+
+    fn get_children(&self, id: TrieId) -> Result<Vec<(TrieKey, TrieId)>> {
+        let prefix = Keys::NodeChildren(id).to_bytes();
+        let mut upper_bound = prefix.clone();
+        *upper_bound.last_mut().unwrap() += 1;
+        let db = self.db();
+        let iter = db.get_range(&prefix, &upper_bound);
+
+        let mut children = vec![];
+
+        for item in iter {
+            let item = item?;
+            let key = Keys::from_bytes(item.0.as_ref()).map_err(Error::DecodeError)?;
+            let value = Values::<M, C>::parse(&key, item.1.as_ref())?.node_child()?;
+            let key = key.node_child()?.1;
+
+            children.push((key, value))
+        }
+
+        Ok(children)
+    }
+
+    fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
+        self.db_get(Keys::NodeChild(id, key))?
+            .map(|v| v.node_child())
+            .transpose()
+    }
+
+    fn get_ensure(&self, id: TrieId) -> Result<TrieNode<C>> {
+        self.get(id)?
+            .ok_or_else(|| Error::TreeBroken(format!("Trie id {id} not found")))
+    }
+
+    fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
+        let mut target_id = child_id;
+        while let Some(node) = self.get(target_id)? {
+            if node.parent == ancestor_id {
+                return Ok(true);
+            }
+            target_id = node.parent;
+            if target_id.id() < 10 {
+                break;
+            }
+        }
+        Ok(false)
+    }
+
+    fn get_id_by_path(&self, path: &str) -> Result<Option<TrieId>> {
+        let mut id = ROOT;
+        if path != "/" {
+            for part in PathTools::parts(path) {
+                if let Some(child_id) = self.get_child(id, TrieKey(part.to_string()))? {
+                    id = child_id
+                } else {
+                    return Ok(None);
+                }
+            }
+        }
+
+        Ok(Some(id))
+    }
+
+    fn get_refs_by_path(&self, path: &str) -> Result<Option<Vec<TrieRef>>> {
+        self.get_id_by_path(path).and_then(|id| {
+            if let Some(id) = id {
+                self.get_refs(id)
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn get_by_path(&self, path: &str) -> Result<Option<TrieNode<C>>> {
+        self.get_id_by_path(path).and_then(|id| {
+            if let Some(id) = id {
+                self.get(id)
+            } else {
+                Ok(None)
+            }
+        })
+    }
+}
+
 #[derive(Clone)]
-pub struct TrieStore<DBImpl: DB, M: TrieMarker, C: TrieContent> {
+pub struct TrieStore<DBImpl, M: TrieMarker, C: TrieContent> {
     db: DBImpl,
     m: PhantomData<M>,
     c: PhantomData<C>,
 }
 
-impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
+impl<DBImpl: DBRead, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     pub fn from_db(db: DBImpl) -> Self {
         Self {
             db,
@@ -476,6 +597,35 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
         }
     }
 
+    pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<LogOp<M, C>>> + '_> {
+        let prefix = Keys::Logs.to_bytes();
+        let mut upper_bound = prefix.clone();
+        *upper_bound.last_mut().unwrap() += 1;
+        let iter = self.db.get_range(&prefix, &upper_bound);
+
+        Ok(iter.map(|item| {
+            item.map_err(Error::from).and_then(|item| {
+                let key = Keys::from_bytes(item.0.as_ref()).map_err(Error::DecodeError)?;
+                let value = Values::<M, C>::parse(&key, item.1.as_ref())?.log()?;
+
+                Ok(value)
+            })
+        }))
+    }
+}
+
+impl<DBImpl: DBRead, M: TrieMarker, C: TrieContent> TrieStoreRead<M, C>
+    for TrieStore<DBImpl, M, C>
+{
+    type DBReadImpl<'a> = &'a DBImpl
+    where Self: 'a;
+
+    fn db(&self) -> Self::DBReadImpl<'_> {
+        &self.db
+    }
+}
+
+impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
     pub fn init(db: DBImpl) -> Result<Self> {
         let mut this = Self::from_db(db);
 
@@ -528,138 +678,9 @@ impl<DBImpl: DB, M: TrieMarker, C: TrieContent> TrieStore<DBImpl, M, C> {
         Ok(this)
     }
 
-    fn db_get(&self, key: Keys) -> Result<Option<Values<M, C>>> {
-        if let Some(value) = self.db.get(key.to_bytes())? {
-            Ok(Some(Values::parse(&key, value.as_ref())?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
-        self.db_get(Keys::RefIdIndex(r))?
-            .map(|v| v.ref_id_index())
-            .transpose()
-    }
-
-    pub fn get_id_ensure(&self, r: TrieRef) -> Result<TrieId> {
-        self.db_get(Keys::RefIdIndex(r))?
-            .ok_or(Error::TreeBroken("ref not found".to_string()))
-            .and_then(|v| v.ref_id_index())
-    }
-
-    pub fn get_refs(&self, id: TrieId) -> Result<Option<impl Iterator<Item = TrieRef>>> {
-        self.db_get(Keys::IdRefsIndex(id))?
-            .map(|v| v.id_refs_index().map(|v| v.into_iter()))
-            .transpose()
-    }
-
-    pub fn get(&self, id: TrieId) -> Result<Option<TrieNode<C>>> {
-        self.db_get(Keys::NodeInfo(id))?
-            .map(|v| v.node_info())
-            .transpose()
-    }
-
-    pub fn get_children(
-        &self,
-        id: TrieId,
-    ) -> Result<impl Iterator<Item = Result<(TrieKey, TrieId)>> + '_> {
-        let prefix = Keys::NodeChildren(id).to_bytes();
-        let mut upper_bound = prefix.clone();
-        *upper_bound.last_mut().unwrap() += 1;
-        let iter = self.db.get_range(&prefix, &upper_bound);
-
-        Ok(iter.map(|item| {
-            item.map_err(Error::from).and_then(|item| {
-                let key = Keys::from_bytes(item.0.as_ref()).map_err(Error::DecodeError)?;
-                let value = Values::<M, C>::parse(&key, item.1.as_ref())?.node_child()?;
-                let key = key.node_child()?.1;
-
-                Ok((key, value))
-            })
-        }))
-    }
-
-    pub fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
-        self.db_get(Keys::NodeChild(id, key))?
-            .map(|v| v.node_child())
-            .transpose()
-    }
-
-    pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<LogOp<M, C>>> + '_> {
-        let prefix = Keys::Logs.to_bytes();
-        let mut upper_bound = prefix.clone();
-        *upper_bound.last_mut().unwrap() += 1;
-        let iter = self.db.get_range(&prefix, &upper_bound);
-
-        Ok(iter.map(|item| {
-            item.map_err(Error::from).and_then(|item| {
-                let key = Keys::from_bytes(item.0.as_ref()).map_err(Error::DecodeError)?;
-                let value = Values::<M, C>::parse(&key, item.1.as_ref())?.log()?;
-
-                Ok(value)
-            })
-        }))
-    }
-
-    pub fn get_ensure(&self, id: TrieId) -> Result<TrieNode<C>> {
-        self.get(id)?
-            .ok_or_else(|| Error::TreeBroken(format!("Trie id {id} not found")))
-    }
-
-    pub fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
-        let mut target_id = child_id;
-        while let Some(node) = self.get(target_id)? {
-            if node.parent == ancestor_id {
-                return Ok(true);
-            }
-            target_id = node.parent;
-            if target_id.id() < 10 {
-                break;
-            }
-        }
-        Ok(false)
-    }
-
-    pub fn get_id_by_path(&self, path: &str) -> Result<Option<TrieId>> {
-        let mut id = ROOT;
-        if path != "/" {
-            for part in PathTools::parts(path) {
-                if let Some(child_id) = self.get_child(id, TrieKey(part.to_string()))? {
-                    id = child_id
-                } else {
-                    return Ok(None);
-                }
-            }
-        }
-
-        Ok(Some(id))
-    }
-
-    pub fn get_refs_by_path(
-        &self,
-        path: &str,
-    ) -> Result<Option<impl Iterator<Item = TrieRef> + '_>> {
-        self.get_id_by_path(path).and_then(|id| {
-            if let Some(id) = id {
-                self.get_refs(id)
-            } else {
-                Ok(None)
-            }
-        })
-    }
-
-    pub fn get_by_path(&self, path: &str) -> Result<Option<impl Borrow<TrieNode<C>> + '_>> {
-        self.get_id_by_path(path).and_then(|id| {
-            if let Some(id) = id {
-                self.get(id)
-            } else {
-                Ok(None)
-            }
-        })
-    }
-
-    pub fn start_transaction(&'_ mut self) -> Result<TrieStoreTransaction<DBImpl::Transaction<'_>, M, C>> {
+    pub fn start_transaction(
+        &'_ mut self,
+    ) -> Result<TrieStoreTransaction<DBImpl::Transaction<'_>, M, C>> {
         let transaction = TrieStoreTransaction::from_db(self.db.start_transaction()?);
 
         transaction.lock()?;
@@ -674,6 +695,17 @@ pub struct TrieStoreTransaction<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker
     cache_inc_id: Option<TrieId>,
     m: PhantomData<M>,
     c: PhantomData<C>,
+}
+
+impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent> TrieStoreRead<M, C>
+    for TrieStoreTransaction<DBImpl, M, C>
+{
+    type DBReadImpl<'a> = &'a DBImpl
+    where Self: 'a;
+
+    fn db(&self) -> Self::DBReadImpl<'_> {
+        &self.transaction
+    }
 }
 
 impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
@@ -727,7 +759,9 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
                 cache_log_total_len
             } else {
                 self.db_get(Keys::LogTotalLength)?
-                    .ok_or(Error::InvalidOp("Trie Database not initialized.".to_owned()))?
+                    .ok_or(Error::InvalidOp(
+                        "Trie Database not initialized.".to_owned(),
+                    ))?
                     .log_total_length()?
             },
         )
@@ -735,62 +769,6 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
 
     fn update_log_total_len(&mut self, new_len: u64) -> Result<()> {
         self.db_set(Keys::LogTotalLength, Values::LogTotalLength(new_len))
-    }
-
-    pub fn get_id(&self, r: TrieRef) -> Result<Option<TrieId>> {
-        self.db_get(Keys::RefIdIndex(r))?
-            .map(|v| v.ref_id_index())
-            .transpose()
-    }
-
-    pub fn get_id_ensure(&self, r: TrieRef) -> Result<TrieId> {
-        self.db_get(Keys::RefIdIndex(r))?
-            .ok_or(Error::TreeBroken("ref not found".to_string()))
-            .and_then(|v| v.ref_id_index())
-    }
-
-    pub fn get_refs(&self, id: TrieId) -> Result<Option<impl Iterator<Item = TrieRef>>> {
-        self.db_get(Keys::IdRefsIndex(id))?
-            .map(|v| v.id_refs_index().map(|v| v.into_iter()))
-            .transpose()
-    }
-
-    pub fn get(&self, id: TrieId) -> Result<Option<TrieNode<C>>> {
-        self.db_get(Keys::NodeInfo(id))?
-            .map(|v| v.node_info())
-            .transpose()
-    }
-
-    pub fn get_children(
-        &self,
-        id: TrieId,
-    ) -> Result<impl Iterator<Item = Result<(TrieKey, TrieId)>> + '_> {
-        let prefix = Keys::NodeChildren(id).to_bytes();
-        let mut upper_bound = prefix.clone();
-        *upper_bound.last_mut().unwrap() += 1;
-        let iter = self.transaction.get_range(&prefix, &upper_bound);
-
-        Ok(iter.map(|item| {
-            item.map_err(Error::from).and_then(|item| {
-                let key = Keys::from_bytes(item.0.as_ref()).map_err(Error::DecodeError)?;
-                let value = Values::<M, C>::parse(&key, item.1.as_ref())?.node_child()?;
-                let key = key.node_child()?.1;
-
-                Ok((key, value))
-            })
-        }))
-    }
-
-    pub fn get_child(&self, id: TrieId, key: TrieKey) -> Result<Option<TrieId>> {
-        self.db_get(Keys::NodeChild(id, key))?
-            .map(|v| v.node_child())
-            .transpose()
-    }
-
-    pub fn get_child_ensure(&self, id: TrieId, key: TrieKey) -> Result<TrieId> {
-        self.db_get(Keys::NodeChild(id, key))?
-            .ok_or(Error::TreeBroken("child not found".to_string()))
-            .and_then(|v| v.node_child())
     }
 
     pub fn iter_log(&self) -> Result<impl Iterator<Item = Result<LogOp<M, C>>> + '_> {
@@ -807,60 +785,6 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
                 Ok(value)
             })
         }))
-    }
-
-    pub fn get_ensure(&self, id: TrieId) -> Result<TrieNode<C>> {
-        self.get(id)?
-            .ok_or_else(|| Error::TreeBroken(format!("Trie id {id} not found")))
-    }
-
-    pub fn is_ancestor(&self, child_id: TrieId, ancestor_id: TrieId) -> Result<bool> {
-        let mut target_id = child_id;
-        while let Some(node) = self.get(target_id)? {
-            if node.parent == ancestor_id {
-                return Ok(true);
-            }
-            target_id = node.parent;
-            if target_id.id() < 10 {
-                break;
-            }
-        }
-        Ok(false)
-    }
-
-    pub fn get_id_by_path(&self, path: &str) -> Result<Option<TrieId>> {
-        let mut id = ROOT;
-        if path != "/" {
-            for part in PathTools::parts(path) {
-                if let Some(child_id) = self.get_child(id, TrieKey(part.to_string()))? {
-                    id = child_id
-                } else {
-                    return Ok(None);
-                }
-            }
-        }
-
-        Ok(Some(id))
-    }
-
-    pub fn get_refs_by_path(&self, path: &str) -> Result<Option<impl Iterator<Item = TrieRef>>> {
-        self.get_id_by_path(path).and_then(|id| {
-            if let Some(id) = id {
-                self.get_refs(id)
-            } else {
-                Ok(None)
-            }
-        })
-    }
-
-    pub fn get_by_path(&self, path: &str) -> Result<Option<TrieNode<C>>> {
-        self.get_id_by_path(path).and_then(|id| {
-            if let Some(id) = id {
-                self.get(id)
-            } else {
-                Ok(None)
-            }
-        })
     }
 
     pub fn set_ref(&mut self, r: TrieRef, id: Option<TrieId>) -> Result<Option<TrieId>> {
@@ -913,7 +837,9 @@ impl<DBImpl: DBRead + DBWrite + DBLock, M: TrieMarker, C: TrieContent>
             cache_inc_id
         } else {
             self.db_get(Keys::AutoIncrementId)?
-                .ok_or(Error::InvalidOp("Trie Database not initialized.".to_owned()))?
+                .ok_or(Error::InvalidOp(
+                    "Trie Database not initialized.".to_owned(),
+                ))?
                 .auto_increment_id()?
         };
         let new_id = id.inc();

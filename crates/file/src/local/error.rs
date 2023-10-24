@@ -1,5 +1,5 @@
 use thiserror::Error;
-use tracker::Error as TrackerError;
+use crate::tracker::Error as TrackerError;
 
 #[derive(Error, Debug)]
 pub enum Error {
